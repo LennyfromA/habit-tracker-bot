@@ -15,10 +15,11 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="🌙 Вечерний чек-ин"),
         ],
         [
+            KeyboardButton(text="🥗 Питание"),
             KeyboardButton(text="📊 Статистика"),
-            KeyboardButton(text="📁 Экспорт"),
         ],
         [
+            KeyboardButton(text="📁 Экспорт"),
             KeyboardButton(text="⚙️ Настройки"),
         ],
     ]

@@ -41,6 +41,13 @@ Built with **Python 3.11+**, **aiogram 3.x**, **aiosqlite**, **APScheduler**, an
    - `/stats`: Summary text with completion rate % + dark-themed **matplotlib** chart rendered in-memory (daily bar chart + habit focus distribution).
    - `/export`: Exports weekly report as a `.md` (Markdown) file with checkmarks, durations, and notes.
 
+6. **Nutrition, Water & Morning Weight Tracker (`nutrition.py`)**:
+   - **Calories & Snacks**: One-line quick logging (`Кофе с молоком 120`, `+250`, `/snack Яблоко 70`). Optional BJU (`Творог 180 20/4/3`).
+   - **Water Tracker**: 1-click hydration buttons (`[💧 +250 мл]`, `[🍶 +500 мл]`), custom amounts (`/water 300`), undo last entry, and visual progress bar: `💧 Вода: [■■■■■□□□] 1250 / 2000 мл`.
+   - **Morning Weight Tracker**: Record daily weight (`/weight 72.4`), view 7-day and 30-day dynamics (`-0.3 кг` since previous, `-0.7 кг` over week).
+   - **Weight Reminder Notification**: Configurable scheduled morning alert (e.g. `08:00`), easy toggle ON/OFF, preset time buttons (`07:00`, `07:30`, `08:00`, `08:30`, `09:00`, `10:00`) or custom time.
+   - Integrated with daily evening check-in and SQLite WAL persistence.
+
 ---
 
 ## 📂 Project Structure
@@ -53,23 +60,29 @@ habit_tracker_bot/
 │   │   ├── db.py             # SQLite WAL connection pool & DDL scripts
 │   │   ├── users_repo.py     # User queries, timezone, weekly freezes
 │   │   ├── habits_repo.py    # Habit definitions, daily logs, streaks
-│   │   └── timers_repo.py    # Active timer session persistence
+│   │   ├── timers_repo.py    # Active timer session persistence
+│   │   ├── nutrition_repo.py # Nutrition targets, daily food logs, macros
+│   │   ├── water_repo.py     # Water logs, daily hydration, targets, undo
+│   │   └── weight_repo.py    # Weight records, history, dynamics calculations
 │   ├── handlers/
 │   │   ├── start.py          # /start, timezone & checkin setup FSM
 │   │   ├── habits.py         # List, create (FSM + quick syntax), delete, freeze
 │   │   ├── timer.py          # Start focus, pause, resume, add time, early stop
+│   │   ├── nutrition.py      # Food/snack logger, quick text parser, dashboard
 │   │   ├── checkin.py        # Evening review interactive dashboard
 │   │   └── stats.py          # Text summary, matplotlib chart, .md export
 │   ├── keyboards/
-│   │   ├── inline.py         # Inline keyboards (timers, checkin, days selector)
+│   │   ├── inline.py         # Inline keyboards (timers, checkin, nutrition)
 │   │   └── reply.py          # Main persistent navigation menu
 │   ├── middlewares/
 │   │   └── user_check.py     # Auth check & automatic user timezone injection
 │   ├── services/
 │   │   ├── scheduler.py      # APScheduler 60s tick, timers, checkin, midnight reset
-│   │   └── chart_builder.py  # In-memory dark-themed matplotlib chart renderer
+│   │   ├── chart_builder.py  # In-memory dark-themed matplotlib chart renderer
+│   │   └── nutrition_parser.py # One-line meal string parser & dashboard formatter
 │   └── states/
-│       └── habit_states.py   # Aiogram FSM StatesGroups
+│       ├── habit_states.py   # Aiogram FSM StatesGroups (Habits & Timers)
+│       └── nutrition_states.py # Aiogram FSM StatesGroups (Food & Goals)
 ├── .env.example
 ├── .env
 ├── main.py                   # Bot entrypoint & lifecycle management
@@ -86,6 +99,11 @@ habit_tracker_bot/
 - `habits`: Stores habit definitions, daily target minutes, active days mask (`'1,2,3,4,5,6,7'`), current streak count, and today's freeze flag.
 - `habit_logs`: Daily execution records (`logged_date`, `spent_minutes`, `is_completed`, `notes`) with `UNIQUE(habit_id, logged_date)`.
 - `active_timers`: Persists in-flight focus timers (`user_id`, `habit_id`, `started_at`, `total_target_seconds`, `elapsed_before_pause`, `is_paused`, `message_id`, `chat_id`).
+- `nutrition_goals`: Stores user daily caloric target and optional macro goals (`target_calories`, `target_protein`, `target_fat`, `target_carbs`).
+- `meal_logs`: Individual meals and snacks (`logged_date`, `meal_type`, `title`, `calories`, `protein`, `fat`, `carbs`).
+- `water_goals`: Hydration targets (`target_ml`).
+- `water_logs`: Water intake records in milliliters (`logged_date`, `amount_ml`).
+- `weight_logs`: Morning weight records with date uniqueness (`logged_date`, `weight`, `note`).
 
 ---
 

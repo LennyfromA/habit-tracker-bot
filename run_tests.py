@@ -6,12 +6,24 @@ import sys
 import time
 
 from bot.config import settings
-from bot.database import habits_repo, timers_repo, users_repo
+from bot.database import (
+    habits_repo,
+    nutrition_repo,
+    timers_repo,
+    users_repo,
+    water_repo,
+    weight_repo,
+)
 from bot.database.db import init_db
 from bot.handlers.habits import parse_days_argument, render_progress_bar
 from bot.handlers.start import calculate_offset_from_time_str
 from bot.handlers.timer import calculate_timer_spent_seconds
 from bot.services.chart_builder import build_weekly_stats_chart
+from bot.services.nutrition_parser import (
+    format_nutrition_dashboard,
+    format_weight_dashboard,
+    parse_meal_input,
+)
 
 TEST_DB = "standalone_test.db"
 
@@ -166,6 +178,120 @@ async def run_all_checks():
     assert export_data[0]["habit"]["name"] == "Английский"
     assert len(export_data[0]["logs"]) > 0
     print("✅ 8. Export markdown data retrieval verified.")
+
+    # 8. Nutrition Repo & Parser Tests
+    # Default goals
+    goals = await nutrition_repo.get_nutrition_goals(101)
+    assert goals["target_calories"] == 2000
+
+    # Custom goals
+    updated_goals = await nutrition_repo.set_nutrition_goals(101, 2300, 150.0, 70.0, 260.0)
+    assert updated_goals["target_calories"] == 2300
+    assert updated_goals["target_protein"] == 150.0
+
+    # Add meal without macros (just calories)
+    m1 = await nutrition_repo.add_meal(101, "2026-10-22", "Кофе с молоком", 120, meal_type="snack")
+    assert m1["id"] > 0
+    assert m1["calories"] == 120
+    assert m1["protein"] == 0.0
+
+    # Add meal with macros
+    m2 = await nutrition_repo.add_meal(101, "2026-10-22", "Творог", 180, protein=20.0, fat=4.0, carbs=3.0, meal_type="snack")
+    assert m2["calories"] == 180
+    assert m2["protein"] == 20.0
+
+    # Add lunch
+    m3 = await nutrition_repo.add_meal(101, "2026-10-22", "Обед курица с рисом", 450, protein=35.0, fat=10.0, carbs=50.0, meal_type="lunch")
+    assert m3["meal_type"] == "lunch"
+
+    # Daily summary check
+    summary = await nutrition_repo.get_daily_summary(101, "2026-10-22")
+    assert summary["meal_count"] == 3
+    assert summary["total_calories"] == 120 + 180 + 450  # 750
+    assert summary["total_protein"] == 20.0 + 35.0      # 55.0
+    assert summary["total_fat"] == 4.0 + 10.0          # 14.0
+    assert summary["total_carbs"] == 3.0 + 50.0        # 53.0
+
+    # List meals for date
+    day_meals = await nutrition_repo.get_meals_for_date(101, "2026-10-22")
+    assert len(day_meals) == 3
+
+    # Delete meal
+    del_res = await nutrition_repo.delete_meal(m1["id"], 101)
+    assert del_res is True
+    summary_after = await nutrition_repo.get_daily_summary(101, "2026-10-22")
+    assert summary_after["meal_count"] == 2
+    assert summary_after["total_calories"] == 630
+
+    # Parser tests
+    p1 = parse_meal_input("Кофе с молоком 120")
+    assert p1 is not None and p1["title"] == "Кофе с молоком" and p1["calories"] == 120 and p1["protein"] == 0.0
+
+    p2 = parse_meal_input("+250")
+    assert p2 is not None and p2["calories"] == 250
+
+    p3 = parse_meal_input("Творог 180 20/4/3")
+    assert p3 is not None and p3["title"] == "Творог" and p3["calories"] == 180 and p3["protein"] == 20.0 and p3["fat"] == 4.0 and p3["carbs"] == 3.0
+
+    p4 = parse_meal_input("Обед: Курица с гречкой 450 35б 8ж 45у")
+    assert p4 is not None and p4["meal_type"] == "lunch" and p4["calories"] == 450 and p4["protein"] == 35.0
+
+    p5 = parse_meal_input("Завтрак: Омлет 300")
+    assert p5 is not None and p5["meal_type"] == "breakfast" and p5["calories"] == 300
+
+    dash_text = format_nutrition_dashboard(updated_goals, summary_after, day_meals[1:], "2026-10-22")
+    assert "Дневник питания" in dash_text
+    assert "Калории" in dash_text
+    print("✅ 9. Nutrition repo, meals logging, BJU calculation and text parser verified.")
+
+    # 10. Water Repo Tests
+    default_w_tgt = await water_repo.get_water_target(101)
+    assert default_w_tgt == 2000
+    await water_repo.set_water_target(101, 2500)
+    assert await water_repo.get_water_target(101) == 2500
+
+    tot1 = await water_repo.add_water(101, "2026-10-22", 250)
+    assert tot1 == 250
+    tot2 = await water_repo.add_water(101, "2026-10-22", 500)
+    assert tot2 == 750
+    assert await water_repo.get_daily_water(101, "2026-10-22") == 750
+
+    undone = await water_repo.undo_last_water(101, "2026-10-22")
+    assert undone == 500
+    assert await water_repo.get_daily_water(101, "2026-10-22") == 250
+    print("✅ 10. Water repo, hydration goals and undo tests passed.")
+
+    # 11. Weight Repo and Morning Reminder Tests
+    w1 = await weight_repo.log_weight(101, "2026-10-15", 73.2)
+    assert w1["weight"] == 73.2
+    w2 = await weight_repo.log_weight(101, "2026-10-21", 72.8)
+    assert w2["weight"] == 72.8
+    w3 = await weight_repo.log_weight(101, "2026-10-22", 72.5)
+    assert w3["weight"] == 72.5
+
+    # Check stats
+    w_stats = await weight_repo.get_weight_stats(101, "2026-10-22")
+    assert w_stats["today_weight"] == 72.5
+    assert w_stats["latest_weight"] == 72.5
+    assert w_stats["previous_weight"] == 72.8
+    assert w_stats["diff_from_previous"] == -0.3
+    assert w_stats["diff_from_week_ago"] == -0.7
+
+    # Weight reminder in users table
+    await users_repo.update_weight_reminder(101, enabled=1, reminder_time="07:45")
+    u_after = await users_repo.get_user(101)
+    assert u_after["weight_reminder_enabled"] == 1
+    assert u_after["weight_reminder_time"] == "07:45"
+
+    await users_repo.update_user_last_weight_reminder_date(101, "2026-10-22")
+    u_rem = await users_repo.get_user(101)
+    assert u_rem["last_weight_reminder_date"] == "2026-10-22"
+
+    w_dash = format_weight_dashboard(w_stats, "2026-10-22", True, "07:45")
+    assert "Трекер утреннего веса" in w_dash
+    assert "72.5 кг" in w_dash
+    assert "07:45" in w_dash
+    print("✅ 11. Weight repo, history, dynamics calculation, and reminder settings verified.")
 
     # Cleanup
     if os.path.exists(TEST_DB):

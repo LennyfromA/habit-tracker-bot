@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import settings
 from bot.database.db import init_db
-from bot.handlers import checkin, habits, start, stats, timer
+from bot.handlers import checkin, habits, nutrition, start, stats, timer
 from bot.middlewares.user_check import UserCheckMiddleware
 from bot.services.scheduler import init_scheduler
 
@@ -60,6 +60,7 @@ async def main() -> None:
     dp.include_router(habits.router)
     dp.include_router(timer.router)
     dp.include_router(checkin.router)
+    dp.include_router(nutrition.router)
     dp.include_router(stats.router)
 
     # 5. Initialize & Start APScheduler

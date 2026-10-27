@@ -6,14 +6,21 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.database import habits_repo
+from bot.database import habits_repo, nutrition_repo, water_repo
 from bot.keyboards.inline import get_checkin_dashboard_keyboard
 from bot.keyboards.reply import get_main_reply_keyboard
 
 router = Router(name="checkin_router")
 
 
-def format_checkin_text(habits: List[Dict[str, Any]], local_date: str) -> str:
+def format_checkin_text(
+    habits: List[Dict[str, Any]],
+    local_date: str,
+    nutrition_summary: Optional[Dict[str, Any]] = None,
+    nutrition_goals: Optional[Dict[str, Any]] = None,
+    water_ml: int = 0,
+    water_target: int = 2000,
+) -> str:
     """Format check-in status message."""
     total_count = len(habits)
     completed_count = sum(1 for h in habits if h.get("is_completed"))
@@ -35,6 +42,20 @@ def format_checkin_text(habits: List[Dict[str, Any]], local_date: str) -> str:
         else:
             remaining = max(0, target - spent)
             lines.append(f"⏳ «{h['name']}» — {spent}/{target} мин (Осталось: {remaining} мин)")
+
+    if nutrition_summary and nutrition_summary.get("meal_count", 0) > 0:
+        cals = nutrition_summary.get("total_calories", 0)
+        target = (nutrition_goals or {}).get("target_calories", 2000)
+        diff = target - cals
+        diff_str = f"осталось {diff} ккал" if diff >= 0 else f"+{abs(diff)} ккал сверх нормы"
+        p = nutrition_summary.get("total_protein", 0)
+        f = nutrition_summary.get("total_fat", 0)
+        c = nutrition_summary.get("total_carbs", 0)
+        macros_part = f" ({p}Б / {f}Ж / {c}У)" if (p > 0 or f > 0 or c > 0) else ""
+        lines.append(f"\n🥗 **Питание за сегодня:** {cals}/{target} ккал ({diff_str}){macros_part}")
+
+    if water_ml > 0:
+        lines.append(f"💧 **Вода за сегодня:** {water_ml}/{water_target} мл")
 
     incomplete = [h for h in habits if not h.get("is_completed") and not h.get("is_frozen_today")]
     if incomplete:
@@ -63,7 +84,11 @@ async def cmd_checkin(
         )
         return
 
-    text = format_checkin_text(habits, local_date)
+    nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+    nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+    water_cur = await water_repo.get_daily_water(user_id, local_date)
+    water_tgt = await water_repo.get_water_target(user_id)
+    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt)
     kb = get_checkin_dashboard_keyboard(habits)
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
@@ -93,7 +118,11 @@ async def cb_checkin_complete(
 
     # Refresh habits list
     habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
-    text = format_checkin_text(habits, local_date)
+    nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+    nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+    water_cur = await water_repo.get_daily_water(user_id, local_date)
+    water_tgt = await water_repo.get_water_target(user_id)
+    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt)
     kb = get_checkin_dashboard_keyboard(habits)
 
     try:

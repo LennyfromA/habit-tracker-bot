@@ -149,3 +149,110 @@ def get_checkin_dashboard_keyboard(habits: List[dict]) -> InlineKeyboardMarkup:
 
     rows.append([InlineKeyboardButton(text="🎉 Завершить чек-ин", callback_data="checkin_finish")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_nutrition_dashboard_keyboard(has_meals: bool = False, has_water: bool = False) -> InlineKeyboardMarkup:
+    """Build dashboard keyboard for nutrition & hydration menu."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="💧 +250 мл", callback_data="water_add:250"),
+            InlineKeyboardButton(text="🍶 +500 мл", callback_data="water_add:500"),
+            InlineKeyboardButton(text="➕ Вода", callback_data="water_custom"),
+        ],
+        [
+            InlineKeyboardButton(text="➕ Добавить еду", callback_data="nutr_add"),
+            InlineKeyboardButton(text="⚖️ Мой вес", callback_data="weight_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🎯 Моя норма", callback_data="nutr_set_goal"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="nutr_refresh"),
+        ],
+    ]
+    actions_row = []
+    if has_meals:
+        actions_row.append(InlineKeyboardButton(text="🗑 Удалить еду", callback_data="nutr_delete_menu"))
+    if has_water:
+        actions_row.append(InlineKeyboardButton(text="↩️ Отменить воду", callback_data="water_undo"))
+
+    if actions_row:
+        keyboard.append(actions_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_weight_dashboard_keyboard(reminder_enabled: bool) -> InlineKeyboardMarkup:
+    """Build keyboard for weight tracking menu."""
+    rem_text = "🔔 Напоминание: ВКЛ" if reminder_enabled else "🔕 Напоминание: ВЫКЛ"
+    keyboard = [
+        [
+            InlineKeyboardButton(text="⚖️ Записать вес", callback_data="weight_enter"),
+        ],
+        [
+            InlineKeyboardButton(text=rem_text, callback_data="weight_toggle_reminder"),
+            InlineKeyboardButton(text="⏰ Время", callback_data="weight_choose_time"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад к питанию", callback_data="nutr_refresh"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_weight_reminder_time_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard with preset times for morning weight reminder."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="07:00", callback_data="weight_set_time:07:00"),
+            InlineKeyboardButton(text="07:30", callback_data="weight_set_time:07:30"),
+        ],
+        [
+            InlineKeyboardButton(text="08:00 (стандарт)", callback_data="weight_set_time:08:00"),
+            InlineKeyboardButton(text="08:30", callback_data="weight_set_time:08:30"),
+        ],
+        [
+            InlineKeyboardButton(text="09:00", callback_data="weight_set_time:09:00"),
+            InlineKeyboardButton(text="10:00", callback_data="weight_set_time:10:00"),
+        ],
+        [
+            InlineKeyboardButton(text="✍️ Ввести своё время", callback_data="weight_custom_time"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="weight_menu"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_meal_category_inline_keyboard() -> InlineKeyboardMarkup:
+    """Select meal category when adding food."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🍳 Завтрак", callback_data="nutr_cat:breakfast"),
+            InlineKeyboardButton(text="🍲 Обед", callback_data="nutr_cat:lunch"),
+        ],
+        [
+            InlineKeyboardButton(text="🍝 Ужин", callback_data="nutr_cat:dinner"),
+            InlineKeyboardButton(text="🍏 Перекус", callback_data="nutr_cat:snack"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в меню питания", callback_data="nutr_refresh"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_meals_delete_keyboard(meals: List[dict]) -> InlineKeyboardMarkup:
+    """Build keyboard to pick a meal to delete."""
+    rows: List[List[InlineKeyboardButton]] = []
+    # Show up to last 8 meals
+    for m in reversed(meals[-8:]):
+        cals = m.get("calories", 0)
+        title = m.get("title", "Еда")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"❌ {title} ({cals} ккал)",
+                callback_data=f"nutr_del:{m['id']}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="nutr_refresh")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

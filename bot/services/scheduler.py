@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.database import habits_repo, timers_repo, users_repo
@@ -141,6 +142,45 @@ async def check_evening_checkins(bot: Bot) -> None:
             await users_repo.update_user_last_checkin_date(user_id, local_date)
 
 
+async def check_weight_reminders(bot: Bot) -> None:
+    """Trigger morning weight reminder for users at their configured weight_reminder_time."""
+    users = await users_repo.get_all_users()
+    now_utc = datetime.now(timezone.utc)
+
+    for user in users:
+        if not user.get("weight_reminder_enabled"):
+            continue
+
+        user_id = user["user_id"]
+        offset = user.get("utc_offset", 3)
+        reminder_time = user.get("weight_reminder_time", "08:00")
+        local_now = now_utc + timedelta(hours=offset)
+        local_hm = local_now.strftime("%H:%M")
+        local_date = local_now.strftime("%Y-%m-%d")
+
+        if local_hm == reminder_time and user.get("last_weight_reminder_date") != local_date:
+            try:
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="⚖️ Записать утренний вес", callback_data="weight_enter")],
+                    ]
+                )
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "🌅 **Доброе утро! Время утреннего взвешивания.**\n\n"
+                        "Встаньте на весы натощак после пробуждения и зафиксируйте результат, "
+                        "чтобы отслеживать точную динамику веса."
+                    ),
+                    reply_markup=kb,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning("Failed to send weight reminder to %s: %s", user_id, e)
+
+            await users_repo.update_user_last_weight_reminder_date(user_id, local_date)
+
+
 async def check_midnight_resets() -> None:
     """Handle 00:00 streak calculations and weekly freeze resets for each user's local timezone."""
     users = await users_repo.get_all_users()
@@ -183,6 +223,11 @@ async def global_tick(bot: Bot) -> None:
         await check_evening_checkins(bot)
     except Exception as e:
         logger.error("Error in evening checkins: %s", e, exc_info=True)
+
+    try:
+        await check_weight_reminders(bot)
+    except Exception as e:
+        logger.error("Error in weight reminders: %s", e, exc_info=True)
 
     try:
         await check_midnight_resets()

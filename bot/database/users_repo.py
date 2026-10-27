@@ -102,3 +102,27 @@ async def get_all_users() -> List[Dict[str, Any]]:
         async with db.execute(query) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def update_weight_reminder(
+    user_id: int,
+    enabled: int,
+    reminder_time: Optional[str] = None,
+) -> None:
+    """Update user's morning weight reminder settings."""
+    async with get_db() as db:
+        if reminder_time is not None:
+            query = "UPDATE users SET weight_reminder_enabled = ?, weight_reminder_time = ? WHERE user_id = ?;"
+            await db.execute(query, (enabled, reminder_time, user_id))
+        else:
+            query = "UPDATE users SET weight_reminder_enabled = ? WHERE user_id = ?;"
+            await db.execute(query, (enabled, user_id))
+        await db.commit()
+
+
+async def update_user_last_weight_reminder_date(user_id: int, reminder_date: str) -> None:
+    """Store date string when weight reminder was dispatched to avoid duplicate triggers."""
+    async with get_db() as db:
+        query = "UPDATE users SET last_weight_reminder_date = ? WHERE user_id = ?;"
+        await db.execute(query, (reminder_date, user_id))
+        await db.commit()

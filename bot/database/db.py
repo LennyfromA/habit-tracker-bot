@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS users (
     freezes_left INTEGER NOT NULL DEFAULT 1,
     last_checkin_date TEXT DEFAULT NULL,
     last_midnight_date TEXT DEFAULT NULL,
+    weight_reminder_enabled INTEGER NOT NULL DEFAULT 0, -- 1=enabled, 0=disabled
+    weight_reminder_time TEXT NOT NULL DEFAULT '08:00', -- HH:MM
+    last_weight_reminder_date TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -62,9 +65,63 @@ CREATE TABLE IF NOT EXISTS active_timers (
     FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS nutrition_goals (
+    user_id INTEGER PRIMARY KEY,
+    target_calories INTEGER NOT NULL DEFAULT 2000,
+    target_protein REAL NOT NULL DEFAULT 0.0,
+    target_fat REAL NOT NULL DEFAULT 0.0,
+    target_carbs REAL NOT NULL DEFAULT 0.0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS meal_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    logged_date TEXT NOT NULL,                  -- YYYY-MM-DD
+    meal_type TEXT NOT NULL DEFAULT 'snack',    -- breakfast, lunch, dinner, snack
+    title TEXT NOT NULL,
+    calories INTEGER NOT NULL,
+    protein REAL NOT NULL DEFAULT 0.0,
+    fat REAL NOT NULL DEFAULT 0.0,
+    carbs REAL NOT NULL DEFAULT 0.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS water_goals (
+    user_id INTEGER PRIMARY KEY,
+    target_ml INTEGER NOT NULL DEFAULT 2000,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS water_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    logged_date TEXT NOT NULL,                  -- YYYY-MM-DD
+    amount_ml INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS weight_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    logged_date TEXT NOT NULL,                  -- YYYY-MM-DD
+    weight REAL NOT NULL,                       -- e.g. 72.4
+    note TEXT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    UNIQUE(user_id, logged_date)
+);
+
 CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_user_date ON habit_logs(user_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_habit_date ON habit_logs(habit_id, logged_date);
+CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date);
+CREATE INDEX IF NOT EXISTS idx_water_logs_user_date ON water_logs(user_id, logged_date);
+CREATE INDEX IF NOT EXISTS idx_weight_logs_user_date ON weight_logs(user_id, logged_date);
 """
 
 
@@ -80,10 +137,22 @@ async def get_db(db_path: Optional[str] = None) -> AsyncGenerator[aiosqlite.Conn
 
 
 async def init_db(db_path: Optional[str] = None) -> None:
-    """Initialize database tables and indexes."""
+    """Initialize database tables and run safe column migrations."""
     target_path = db_path or settings.DB_PATH
     logger.info("Initializing database at: %s", target_path)
     async with aiosqlite.connect(target_path) as db:
+        db.row_factory = aiosqlite.Row
         await db.executescript(INIT_SQL)
+
+        # Safe column migrations for existing databases
+        async with db.execute("PRAGMA table_info(users);") as cursor:
+            cols = [r["name"] for r in await cursor.fetchall()]
+            if "weight_reminder_enabled" not in cols:
+                await db.execute("ALTER TABLE users ADD COLUMN weight_reminder_enabled INTEGER NOT NULL DEFAULT 0;")
+            if "weight_reminder_time" not in cols:
+                await db.execute("ALTER TABLE users ADD COLUMN weight_reminder_time TEXT NOT NULL DEFAULT '08:00';")
+            if "last_weight_reminder_date" not in cols:
+                await db.execute("ALTER TABLE users ADD COLUMN last_weight_reminder_date TEXT DEFAULT NULL;")
+
         await db.commit()
     logger.info("Database initialized successfully.")
