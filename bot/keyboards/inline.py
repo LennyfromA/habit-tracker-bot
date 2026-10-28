@@ -256,3 +256,70 @@ def get_meals_delete_keyboard(meals: List[dict]) -> InlineKeyboardMarkup:
         ])
     rows.append([InlineKeyboardButton(text="🔙 Назад", callback_data="nutr_refresh")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_habits_hub_keyboard() -> InlineKeyboardMarkup:
+    """Action buttons for Habits section."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="➕ Новая привычка", callback_data="habits_hub:new"),
+            InlineKeyboardButton(text="⏱ Таймер фокуса", callback_data="habits_hub:timer"),
+        ],
+        [
+            InlineKeyboardButton(text="🌙 Вечерний чек-ин", callback_data="habits_hub:checkin"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="habits_hub:stats"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_settings_hub_keyboard() -> InlineKeyboardMarkup:
+    """Action buttons for Settings section."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🔔 Все уведомления", callback_data="settings_notifications"),
+        ],
+        [
+            InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="settings_timezone"),
+            InlineKeyboardButton(text="📁 Экспорт отчета", callback_data="settings_export"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_notifications_hub_keyboard(is_muted: bool) -> InlineKeyboardMarkup:
+    """Action buttons for Notifications control."""
+    if is_muted:
+        toggle_btn = InlineKeyboardButton(text="🔔 Включить уведомления", callback_data="notif_unmute")
+    else:
+        toggle_btn = InlineKeyboardButton(text="🔕 Отключить все уведомления", callback_data="notif_mute_menu")
+
+    keyboard = [
+        [toggle_btn],
+        [
+            InlineKeyboardButton(text="⏰ Время чек-ина", callback_data="settings_ci_time"),
+            InlineKeyboardButton(text="🌅 Взвешивание", callback_data="weight_choose_time"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в настройки", callback_data="settings_main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_mute_duration_keyboard() -> InlineKeyboardMarkup:
+    """Duration selector for muting notifications."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="⏳ На 1 час", callback_data="notif_mute:3600"),
+            InlineKeyboardButton(text="📅 На 1 день (24 ч)", callback_data="notif_mute:86400"),
+        ],
+        [
+            InlineKeyboardButton(text="🗓 На 1 неделю", callback_data="notif_mute:604800"),
+            InlineKeyboardButton(text="♾ Навсегда", callback_data="notif_mute:forever"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Отмена", callback_data="settings_notifications"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

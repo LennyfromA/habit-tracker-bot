@@ -13,6 +13,7 @@ from bot.keyboards.inline import (
     DAY_LABELS,
     get_days_selector_keyboard,
     get_habit_actions_keyboard,
+    get_habits_hub_keyboard,
 )
 from bot.keyboards.reply import get_main_reply_keyboard
 from bot.states.habit_states import HabitCreationStates
@@ -55,7 +56,7 @@ def parse_days_argument(days_arg: str) -> str:
 # Habit Listing
 # ---------------------------------------------------------
 
-@router.message(F.text == "📋 Мои привычки")
+@router.message(F.text.in_(["📋 Привычки", "📋 Мои привычки"]))
 @router.message(Command("habits"))
 async def cmd_habits_list(
     message: Message,
@@ -75,15 +76,15 @@ async def cmd_habits_list(
         if not all_habits:
             await message.answer(
                 "📋 У вас пока нет созданных привычек.\n\n"
-                "Нажмите «➕ Новая привычка» или отправьте `/new <Название> <Минуты>`, чтобы добавить первую!",
-                reply_markup=get_main_reply_keyboard(),
+                "Нажмите «➕ Новая привычка» ниже или отправьте `/new <Название> <Минуты>`, чтобы добавить первую!",
+                reply_markup=get_habits_hub_keyboard(),
                 parse_mode="Markdown",
             )
         else:
             await message.answer(
                 f"🌴 На сегодня ({DAY_LABELS.get(local_weekday, '')}, {local_date}) запланированных привычек нет!\n\n"
                 f"Всего у вас создано привычек: {len(all_habits)}. Чтобы посмотреть все: `/habits_all`.",
-                reply_markup=get_main_reply_keyboard(),
+                reply_markup=get_habits_hub_keyboard(),
                 parse_mode="Markdown",
             )
         return
@@ -122,6 +123,12 @@ async def cmd_habits_list(
             can_freeze=(freezes_left > 0),
         )
         await message.answer(card_text, reply_markup=kb, parse_mode="Markdown")
+
+    await message.answer(
+        "⚡ **Действия с привычками и фокусом:**",
+        reply_markup=get_habits_hub_keyboard(),
+        parse_mode="Markdown",
+    )
 
 
 @router.message(Command("habits_all"))
@@ -372,3 +379,47 @@ async def cb_delete_habit(callback: CallbackQuery) -> None:
         )
     except Exception:
         pass
+
+
+# ---------------------------------------------------------
+# Habits Hub Action Callbacks
+# ---------------------------------------------------------
+
+@router.callback_query(F.data == "habits_hub:new")
+async def cb_habits_hub_new(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch interactive habit creation wizard."""
+    await state.set_state(HabitCreationStates.waiting_for_name)
+    await callback.message.answer(
+        "📝 **Шаг 1 из 3:** Введите название новой привычки (например: «Чтение книг» или «Медитация»):\n"
+        "_(Отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "habits_hub:timer")
+async def cb_habits_hub_timer(callback: CallbackQuery) -> None:
+    """Redirect to focus timer."""
+    from bot.handlers.timer import cmd_active_timer
+    await cmd_active_timer(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "habits_hub:checkin")
+async def cb_habits_hub_checkin(
+    callback: CallbackQuery,
+    local_date: str,
+    local_weekday: int,
+) -> None:
+    """Redirect to evening checkin."""
+    from bot.handlers.checkin import cmd_checkin
+    await cmd_checkin(callback.message, local_date=local_date, local_weekday=local_weekday)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "habits_hub:stats")
+async def cb_habits_hub_stats(callback: CallbackQuery, local_date: str) -> None:
+    """Redirect to statistics and charts."""
+    from bot.handlers.stats import cmd_stats
+    await cmd_stats(callback.message, local_date=local_date)
+    await callback.answer()

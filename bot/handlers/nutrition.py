@@ -81,7 +81,8 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 # Nutrition & Meal Handlers
 # =========================================================================
 
-@router.message(F.text == "🥗 Питание")
+@router.message(F.text.in_(["🍏 Здоровье", "🥗 Питание"]))
+@router.message(Command("health"))
 @router.message(Command("nutrition"))
 @router.message(Command("food"))
 @router.message(Command("eda"))
@@ -603,7 +604,7 @@ async def cb_weight_choose_time(callback: CallbackQuery) -> None:
 async def cb_weight_set_time(callback: CallbackQuery, local_date: str) -> None:
     """Set weight reminder time from presets."""
     user_id = callback.from_user.id
-    chosen_time = callback.data.split(":")[1]
+    chosen_time = callback.data.split(":", 1)[1]
 
     # Automatically enable reminder when time is picked
     await users_repo.update_weight_reminder(user_id, enabled=1, reminder_time=chosen_time)

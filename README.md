@@ -48,6 +48,11 @@ Built with **Python 3.11+**, **aiogram 3.x**, **aiosqlite**, **APScheduler**, an
    - **Weight Reminder Notification**: Configurable scheduled morning alert (e.g. `08:00`), easy toggle ON/OFF, preset time buttons (`07:00`, `07:30`, `08:00`, `08:30`, `09:00`, `10:00`) or custom time.
    - Integrated with daily evening check-in and SQLite WAL persistence.
 
+7. **Clean 3-Button Hub Navigation & Notification Center (`start.py`)**:
+   - Compact main menu: `[🍏 Здоровье]`, `[📋 Привычки]`, `[⚙️ Настройки]`.
+   - **Notification Center**: Detailed overview of all active scheduled alerts and their timings.
+   - **Global Mute / Do Not Disturb**: 1-click option to mute all alerts with duration selector: *1 hour, 1 day (24h), 1 week, or forever*. Unmute button restores alerts instantly.
+
 ---
 
 ## 📂 Project Structure

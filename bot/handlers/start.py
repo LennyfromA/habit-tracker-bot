@@ -1,17 +1,21 @@
 """Handler for onboarding, registration, timezone, and check-in configuration."""
 
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.database import users_repo
 from bot.keyboards.inline import (
     get_checkin_time_inline_keyboard,
+    get_mute_duration_keyboard,
+    get_notifications_hub_keyboard,
+    get_settings_hub_keyboard,
     get_timezone_inline_keyboard,
 )
 from bot.keyboards.reply import get_main_reply_keyboard
@@ -184,26 +188,199 @@ async def msg_checkin_input(message: Message, state: FSMContext) -> None:
     )
 
 
+def build_settings_view(user: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    """Assemble text and keyboard for settings dashboard."""
+    offset = user.get("utc_offset", 3)
+    ci_time = user.get("checkin_time", "21:00")
+    freezes = user.get("freezes_left", 1)
+
+    weight_enabled = bool(user.get("weight_reminder_enabled", 0))
+    weight_time = user.get("weight_reminder_time", "08:00")
+    weight_status = f"{weight_time} (Вкл)" if weight_enabled else "Выключено"
+
+    now_ts = int(time.time())
+    muted_until = user.get("notifications_muted_until", 0) or 0
+    if muted_until > now_ts:
+        if muted_until >= 2000000000:
+            notif_status = "🔕 Отключены НАВСЕГДА"
+        else:
+            until_dt = datetime.fromtimestamp(muted_until, timezone.utc) + timedelta(hours=offset)
+            notif_status = f"🔕 Заглушены до {until_dt.strftime('%d.%m %H:%M')}"
+    else:
+        notif_status = "🔔 Активны"
+
+    text = (
+        f"⚙️ **Настройки бота**\n\n"
+        f"🌍 Часовой пояс: **UTC{offset:+d}**\n"
+        f"🌙 Вечерний чек-ин: **{ci_time}**\n"
+        f"⚖️ Утреннее взвешивание: **{weight_status}**\n"
+        f"❄️ Заморозок стрика на неделю: **{freezes}**\n"
+        f"🔔 Уведомления: **{notif_status}**\n\n"
+        f"Выберите пункт для настройки:"
+    )
+    return text, get_settings_hub_keyboard()
+
+
+def build_notifications_view(user: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    """Assemble text and keyboard for all notifications list."""
+    offset = user.get("utc_offset", 3)
+    ci_time = user.get("checkin_time", "21:00")
+    weight_enabled = bool(user.get("weight_reminder_enabled", 0))
+    weight_time = user.get("weight_reminder_time", "08:00")
+
+    w_str = f"Включено (каждое утро в `{weight_time}`)" if weight_enabled else "Выключено"
+
+    now_ts = int(time.time())
+    muted_until = user.get("notifications_muted_until", 0) or 0
+    is_muted = muted_until > now_ts
+
+    if is_muted:
+        if muted_until >= 2000000000:
+            status_line = "🔕 **Все уведомления отключены НАВСЕГДА.**"
+        else:
+            until_dt = datetime.fromtimestamp(muted_until, timezone.utc) + timedelta(hours=offset)
+            status_line = f"🔕 **Все уведомления временно отключены** до `{until_dt.strftime('%d.%m в %H:%M')}`."
+    else:
+        status_line = "🔔 **Все запланированные уведомления активны.**"
+
+    text = (
+        "🔔 **Управление всеми уведомлениями**\n\n"
+        "Здесь отображаются все регулярные напоминания и их расписание:\n\n"
+        f"1. 🌅 **Утреннее взвешивание**: {w_str}\n"
+        f"2. 🌙 **Вечерний чек-ин**: Включено (каждый вечер в `{ci_time}`)\n"
+        f"3. ⏱ **Таймеры фокуса**: Уведомление со звуком при завершении сессии\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{status_line}"
+    )
+    return text, get_notifications_hub_keyboard(is_muted=is_muted)
+
+
 @router.message(F.text == "⚙️ Настройки")
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, user_data: Optional[Dict[str, Any]] = None) -> None:
-    """Show current settings and allow reconfiguration."""
+    """Show interactive settings dashboard."""
     if not user_data:
         user_data = await users_repo.get_user(message.from_user.id)
 
-    offset = user_data.get("utc_offset", 3) if user_data else 3
-    ci_time = user_data.get("checkin_time", "21:00") if user_data else "21:00"
-    freezes = user_data.get("freezes_left", 1) if user_data else 1
+    text, kb = build_settings_view(user_data or {})
+    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
-    await message.answer(
-        f"⚙️ **Текущие настройки:**\n\n"
-        f"🌍 Часовой пояс: **UTC{offset:+d}**\n"
-        f"🌙 Время вечернего чек-ина: **{ci_time}**\n"
-        f"❄️ Доступно заморозок на неделю: **{freezes}**\n\n"
-        "Для смены часового пояса отправьте команду `/timezone`.\n"
-        "Для изменения времени чек-ина отправьте `/checkin_time`.",
+
+@router.callback_query(F.data == "settings_main")
+async def cb_settings_main(callback: CallbackQuery) -> None:
+    """Return to main settings view."""
+    user = await users_repo.get_user(callback.from_user.id)
+    text, kb = build_settings_view(user or {})
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_notifications")
+async def cb_settings_notifications(callback: CallbackQuery) -> None:
+    """Display all notifications dashboard."""
+    user = await users_repo.get_user(callback.from_user.id)
+    text, kb = build_notifications_view(user or {})
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "notif_mute_menu")
+async def cb_notif_mute_menu(callback: CallbackQuery) -> None:
+    """Show options for how long to mute notifications (disables button and shows durations)."""
+    text = (
+        "🔕 **Отключение всех уведомлений**\n\n"
+        "Выберите срок, на который вы хотите заглушить все напоминания:\n\n"
+        "В этот период бот не будет беспокоить вас утренними напоминаниями о взвешивании и вечерними чек-инами."
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=get_mute_duration_keyboard(), parse_mode="Markdown")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("notif_mute:"))
+async def cb_notif_mute_duration(callback: CallbackQuery) -> None:
+    """Save mute duration."""
+    user_id = callback.from_user.id
+    arg = callback.data.split(":")[1]
+    now_ts = int(time.time())
+
+    if arg == "forever":
+        until_ts = 2147483647
+        alert_msg = "Уведомления отключены навсегда 🔕"
+    else:
+        seconds = int(arg)
+        until_ts = now_ts + seconds
+        alert_msg = "Уведомления временно отключены 🔕"
+
+    await users_repo.mute_notifications(user_id, until_ts)
+    await callback.answer(alert_msg, show_alert=True)
+
+    user = await users_repo.get_user(user_id)
+    text, kb = build_notifications_view(user or {})
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "notif_unmute")
+async def cb_notif_unmute(callback: CallbackQuery) -> None:
+    """Unmute all notifications."""
+    user_id = callback.from_user.id
+    await users_repo.unmute_notifications(user_id)
+    await callback.answer("Уведомления снова включены! 🔔", show_alert=True)
+
+    user = await users_repo.get_user(user_id)
+    text, kb = build_notifications_view(user or {})
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "settings_timezone")
+async def cb_settings_timezone(callback: CallbackQuery, state: FSMContext) -> None:
+    """Change timezone via button."""
+    await state.set_state(OnboardingStates.waiting_for_timezone)
+    await callback.message.answer(
+        "Укажите ваше текущее время (например, `19:40`) или выберите часовой пояс ниже:",
+        reply_markup=get_timezone_inline_keyboard(),
         parse_mode="Markdown",
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_ci_time")
+async def cb_settings_ci_time(callback: CallbackQuery, state: FSMContext) -> None:
+    """Change checkin time via button."""
+    await state.set_state(OnboardingStates.waiting_for_checkin_time)
+    await callback.message.answer(
+        "Выберите новое время вечернего чек-ина или напишите `HH:MM`:",
+        reply_markup=get_checkin_time_inline_keyboard(),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_export")
+async def cb_settings_export(callback: CallbackQuery) -> None:
+    """Trigger markdown export from settings."""
+    from bot.handlers.stats import cmd_export
+    user_id = callback.from_user.id
+    user = await users_repo.get_user(user_id)
+    offset = user.get("utc_offset", 3) if user else 3
+    local_now = datetime.now(timezone.utc) + timedelta(hours=offset)
+    local_date = local_now.strftime("%Y-%m-%d")
+    await cmd_export(callback.message, local_date=local_date)
+    await callback.answer()
 
 
 @router.message(Command("timezone"))

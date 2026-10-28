@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
     weight_reminder_enabled INTEGER NOT NULL DEFAULT 0, -- 1=enabled, 0=disabled
     weight_reminder_time TEXT NOT NULL DEFAULT '08:00', -- HH:MM
     last_weight_reminder_date TEXT DEFAULT NULL,
+    notifications_muted_until INTEGER NOT NULL DEFAULT 0, -- Unix timestamp until which notifications are muted
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -153,6 +154,8 @@ async def init_db(db_path: Optional[str] = None) -> None:
                 await db.execute("ALTER TABLE users ADD COLUMN weight_reminder_time TEXT NOT NULL DEFAULT '08:00';")
             if "last_weight_reminder_date" not in cols:
                 await db.execute("ALTER TABLE users ADD COLUMN last_weight_reminder_date TEXT DEFAULT NULL;")
+            if "notifications_muted_until" not in cols:
+                await db.execute("ALTER TABLE users ADD COLUMN notifications_muted_until INTEGER NOT NULL DEFAULT 0;")
 
         await db.commit()
     logger.info("Database initialized successfully.")

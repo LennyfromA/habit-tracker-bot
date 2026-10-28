@@ -16,8 +16,13 @@ from bot.database import (
 )
 from bot.database.db import init_db
 from bot.handlers.habits import parse_days_argument, render_progress_bar
-from bot.handlers.start import calculate_offset_from_time_str
+from bot.handlers.start import (
+    build_notifications_view,
+    build_settings_view,
+    calculate_offset_from_time_str,
+)
 from bot.handlers.timer import calculate_timer_spent_seconds
+from bot.keyboards.reply import get_main_reply_keyboard
 from bot.services.chart_builder import build_weekly_stats_chart
 from bot.services.nutrition_parser import (
     format_nutrition_dashboard,
@@ -292,6 +297,38 @@ async def run_all_checks():
     assert "72.5 кг" in w_dash
     assert "07:45" in w_dash
     print("✅ 11. Weight repo, history, dynamics calculation, and reminder settings verified.")
+
+    # 12. Main 3-button menu and Notifications Muting Hub
+    main_kb = get_main_reply_keyboard()
+    assert len(main_kb.keyboard) == 2
+    assert main_kb.keyboard[0][0].text == "🍏 Здоровье"
+    assert main_kb.keyboard[0][1].text == "📋 Привычки"
+    assert main_kb.keyboard[1][0].text == "⚙️ Настройки"
+
+    # Settings view
+    u_curr = await users_repo.get_user(101)
+    s_text, s_kb = build_settings_view(u_curr)
+    assert "Настройки бота" in s_text
+    assert "Часовой пояс" in s_text
+
+    # Notifications view - initially unmuted
+    n_text, n_kb = build_notifications_view(u_curr)
+    assert "Все запланированные уведомления активны" in n_text
+
+    # Mute notifications forever
+    await users_repo.mute_notifications(101, 2147483647)
+    u_muted = await users_repo.get_user(101)
+    assert u_muted["notifications_muted_until"] == 2147483647
+    n_text_muted, n_kb_muted = build_notifications_view(u_muted)
+    assert "отключены НАВСЕГДА" in n_text_muted
+
+    # Unmute notifications
+    await users_repo.unmute_notifications(101)
+    u_unmuted = await users_repo.get_user(101)
+    assert u_unmuted["notifications_muted_until"] == 0
+    n_text_unmuted, _ = build_notifications_view(u_unmuted)
+    assert "Все запланированные уведомления активны" in n_text_unmuted
+    print("✅ 12. 3-Button menu structure, Settings Hub, and Notifications mute/unmute verified.")
 
     # Cleanup
     if os.path.exists(TEST_DB):

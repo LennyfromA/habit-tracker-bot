@@ -91,6 +91,11 @@ async def check_evening_checkins(bot: Bot) -> None:
     now_utc = datetime.now(timezone.utc)
 
     for user in users:
+        now_ts = int(time.time())
+        muted_until = user.get("notifications_muted_until", 0) or 0
+        if muted_until > now_ts:
+            continue
+
         user_id = user["user_id"]
         offset = user.get("utc_offset", 3)
         checkin_time = user.get("checkin_time", "21:00")
@@ -187,6 +192,11 @@ async def check_midnight_resets() -> None:
     now_utc = datetime.now(timezone.utc)
 
     for user in users:
+        now_ts = int(time.time())
+        muted_until = user.get("notifications_muted_until", 0) or 0
+        if muted_until > now_ts:
+            continue
+
         user_id = user["user_id"]
         offset = user.get("utc_offset", 3)
         local_now = now_utc + timedelta(hours=offset)

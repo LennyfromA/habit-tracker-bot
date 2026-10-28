@@ -126,3 +126,19 @@ async def update_user_last_weight_reminder_date(user_id: int, reminder_date: str
         query = "UPDATE users SET last_weight_reminder_date = ? WHERE user_id = ?;"
         await db.execute(query, (reminder_date, user_id))
         await db.commit()
+
+
+async def mute_notifications(user_id: int, until_ts: int) -> None:
+    """Mute all notifications for user until specific Unix epoch timestamp."""
+    async with get_db() as db:
+        query = "UPDATE users SET notifications_muted_until = ? WHERE user_id = ?;"
+        await db.execute(query, (until_ts, user_id))
+        await db.commit()
+
+
+async def unmute_notifications(user_id: int) -> None:
+    """Unmute all notifications for user."""
+    async with get_db() as db:
+        query = "UPDATE users SET notifications_muted_until = 0 WHERE user_id = ?;"
+        await db.execute(query, (user_id,))
+        await db.commit()

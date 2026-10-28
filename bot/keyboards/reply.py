@@ -4,27 +4,18 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Build persistent main navigation keyboard."""
+    """Build compact persistent main navigation keyboard (Health, Habits, Settings)."""
     keyboard = [
         [
-            KeyboardButton(text="📋 Мои привычки"),
-            KeyboardButton(text="⏱ Активный таймер"),
+            KeyboardButton(text="🍏 Здоровье"),
+            KeyboardButton(text="📋 Привычки"),
         ],
         [
-            KeyboardButton(text="➕ Новая привычка"),
-            KeyboardButton(text="🌙 Вечерний чек-ин"),
-        ],
-        [
-            KeyboardButton(text="🥗 Питание"),
-            KeyboardButton(text="📊 Статистика"),
-        ],
-        [
-            KeyboardButton(text="📁 Экспорт"),
             KeyboardButton(text="⚙️ Настройки"),
         ],
     ]
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие или команду...",
+        input_field_placeholder="Выберите раздел...",
     )
