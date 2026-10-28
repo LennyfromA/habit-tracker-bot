@@ -46,6 +46,24 @@ def calculate_offset_from_time_str(user_time_str: str) -> Optional[int]:
     return max(-12, min(14, offset))
 
 
+@router.message(Command("cancel"))
+@router.message(F.text.casefold().in_(["/отмена", "отмена", "cancel", "/cancel"]))
+async def global_cmd_cancel(message: Message, state: FSMContext) -> None:
+    """Universally cancel any active FSM state across the bot."""
+    current_state = await state.get_state()
+    await state.clear()
+    if current_state:
+        await message.answer(
+            "❌ Действие отменено.",
+            reply_markup=get_main_reply_keyboard(),
+        )
+    else:
+        await message.answer(
+            "ℹ️ Нет активного действия для отмены.",
+            reply_markup=get_main_reply_keyboard(),
+        )
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,

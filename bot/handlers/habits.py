@@ -158,6 +158,24 @@ async def cmd_habits_all(message: Message, local_date: str) -> None:
 # Habit Creation (FSM & Quick Syntax)
 # ---------------------------------------------------------
 
+@router.message(Command("cancel"))
+@router.message(F.text.casefold().in_(["/отмена", "отмена", "cancel", "/cancel"]))
+async def cmd_cancel_habits(message: Message, state: FSMContext) -> None:
+    """Cancel habit creation or editing."""
+    current_state = await state.get_state()
+    await state.clear()
+    if current_state:
+        await message.answer(
+            "❌ Действие отменено.",
+            reply_markup=get_main_reply_keyboard(),
+        )
+    else:
+        await message.answer(
+            "ℹ️ Нет активного действия для отмены.",
+            reply_markup=get_main_reply_keyboard(),
+        )
+
+
 @router.message(Command("new"))
 async def cmd_new_habit(message: Message, state: FSMContext) -> None:
     """
@@ -227,6 +245,8 @@ async def btn_new_habit(message: Message, state: FSMContext) -> None:
 async def fsm_habit_name(message: Message, state: FSMContext) -> None:
     """Save name and ask for daily target minutes."""
     name = (message.text or "").strip()
+    if name.startswith("/"):
+        return
     if len(name) < 2 or len(name) > 60:
         await message.answer("⚠️ Название должно быть от 2 до 60 символов. Попробуйте еще раз:")
         return
@@ -244,6 +264,8 @@ async def fsm_habit_name(message: Message, state: FSMContext) -> None:
 async def fsm_habit_target(message: Message, state: FSMContext) -> None:
     """Save target minutes and display day-of-week selection keyboard."""
     text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
     if not text.isdigit() or int(text) <= 0 or int(text) > 720:
         await message.answer("⚠️ Пожалуйста, введите положительное число минут от 1 до 720 (12 часов):")
         return
@@ -497,6 +519,8 @@ async def cb_edit_h_name(callback: CallbackQuery, state: FSMContext) -> None:
 async def process_edit_habit_name(message: Message, state: FSMContext) -> None:
     """Process updated habit name."""
     new_name = (message.text or "").strip()
+    if new_name.startswith("/"):
+        return
     if not new_name or len(new_name) > 64:
         await message.answer("⚠️ Название должно быть от 1 до 64 символов. Попробуйте еще раз или /cancel.")
         return
@@ -577,6 +601,8 @@ async def cb_custom_h_time(callback: CallbackQuery, state: FSMContext) -> None:
 async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
     """Process custom target minutes input."""
     text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
     match = re.search(r"\d+", text)
     if not match:
         await message.answer("⚠️ Введите число минут (например: `45`) или /cancel.")
