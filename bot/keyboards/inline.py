@@ -98,14 +98,16 @@ def get_habit_actions_keyboard(
 
     buttons.append([InlineKeyboardButton(text=timer_text, callback_data=f"timer_start:{habit_id}")])
 
-    second_row = []
+    second_row = [
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_habit_menu:{habit_id}"),
+    ]
     if is_frozen_today:
         second_row.append(
-            InlineKeyboardButton(text="❄️ Заморожено сегодня", callback_data="already_frozen")
+            InlineKeyboardButton(text="❄️ Заморожено", callback_data="already_frozen")
         )
     elif can_freeze:
         second_row.append(
-            InlineKeyboardButton(text="❄️ Заморозить день", callback_data=f"freeze_habit:{habit_id}")
+            InlineKeyboardButton(text="❄️ Заморозить", callback_data=f"freeze_habit:{habit_id}")
         )
 
     second_row.append(
@@ -114,6 +116,83 @@ def get_habit_actions_keyboard(
     buttons.append(second_row)
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_habit_edit_menu_keyboard(habit_id: int) -> InlineKeyboardMarkup:
+    """Menu with properties to edit for a habit."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="📝 Название", callback_data=f"edit_h_name:{habit_id}"),
+            InlineKeyboardButton(text="⏱ Время (цель)", callback_data=f"edit_h_time:{habit_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 Дни недели / напоминания", callback_data=f"edit_h_days:{habit_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад к привычкам", callback_data="habits_refresh"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_habit_time_presets_keyboard(habit_id: int) -> InlineKeyboardMarkup:
+    """Presets for habit daily target minutes."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="15 мин", callback_data=f"set_h_time:{habit_id}:15"),
+            InlineKeyboardButton(text="25 мин (Помодоро)", callback_data=f"set_h_time:{habit_id}:25"),
+        ],
+        [
+            InlineKeyboardButton(text="30 мин", callback_data=f"set_h_time:{habit_id}:30"),
+            InlineKeyboardButton(text="45 мин", callback_data=f"set_h_time:{habit_id}:45"),
+        ],
+        [
+            InlineKeyboardButton(text="60 мин (1 час)", callback_data=f"set_h_time:{habit_id}:60"),
+            InlineKeyboardButton(text="90 мин", callback_data=f"set_h_time:{habit_id}:90"),
+        ],
+        [
+            InlineKeyboardButton(text="✍️ Ввести своё время", callback_data=f"custom_h_time:{habit_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data=f"edit_habit_menu:{habit_id}"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_edit_days_selector_keyboard(habit_id: int, selected_days: Set[int]) -> InlineKeyboardMarkup:
+    """Build day-of-week toggle keyboard for habit editing."""
+    row1 = [
+        InlineKeyboardButton(
+            text=f"{DAY_LABELS[d]} {'✅' if d in selected_days else '◻️'}",
+            callback_data=f"toggle_edit_day:{habit_id}:{d}",
+        )
+        for d in [1, 2, 3, 4]
+    ]
+
+    row2 = [
+        InlineKeyboardButton(
+            text=f"{DAY_LABELS[d]} {'✅' if d in selected_days else '◻️'}",
+            callback_data=f"toggle_edit_day:{habit_id}:{d}",
+        )
+        for d in [5, 6, 7]
+    ]
+
+    row3 = [
+        InlineKeyboardButton(text="📅 Каждый день", callback_data=f"preset_edit_days:{habit_id}:all"),
+        InlineKeyboardButton(text="💼 Будни", callback_data=f"preset_edit_days:{habit_id}:weekdays"),
+        InlineKeyboardButton(text="🏖 Выходные", callback_data=f"preset_edit_days:{habit_id}:weekends"),
+    ]
+
+    row4 = [
+        InlineKeyboardButton(text="Сохранить дни ✔️", callback_data=f"save_edit_days:{habit_id}"),
+    ]
+
+    row5 = [
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"edit_habit_menu:{habit_id}"),
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3, row4, row5])
 
 
 def get_timer_controls_keyboard(is_paused: bool) -> InlineKeyboardMarkup:

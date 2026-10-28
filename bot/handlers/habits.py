@@ -12,11 +12,14 @@ from bot.database import habits_repo, users_repo
 from bot.keyboards.inline import (
     DAY_LABELS,
     get_days_selector_keyboard,
+    get_edit_days_selector_keyboard,
     get_habit_actions_keyboard,
+    get_habit_edit_menu_keyboard,
+    get_habit_time_presets_keyboard,
     get_habits_hub_keyboard,
 )
 from bot.keyboards.reply import get_main_reply_keyboard
-from bot.states.habit_states import HabitCreationStates
+from bot.states.habit_states import HabitCreationStates, HabitEditStates
 
 router = Router(name="habits_router")
 
@@ -423,3 +426,298 @@ async def cb_habits_hub_stats(callback: CallbackQuery, local_date: str) -> None:
     from bot.handlers.stats import cmd_stats
     await cmd_stats(callback.message, local_date=local_date)
     await callback.answer()
+
+
+# ---------------------------------------------------------
+# Habit Editing Handlers
+# ---------------------------------------------------------
+
+def format_habit_edit_card(habit: Dict[str, Any]) -> str:
+    """Format markdown summary of habit settings for the edit dashboard."""
+    name = habit["name"]
+    target = habit["target_minutes"]
+    active_days_raw = str(habit.get("active_days") or "1,2,3,4,5,6,7")
+    days_labels = ", ".join(DAY_LABELS.get(int(d), str(d)) for d in active_days_raw.split(",") if d.isdigit())
+    if active_days_raw == "1,2,3,4,5,6,7":
+        days_str = "Каждый день (Пн–Вс)"
+    elif active_days_raw == "1,2,3,4,5":
+        days_str = "Будни (Пн–Пт)"
+    elif active_days_raw == "6,7":
+        days_str = "Выходные (Сб–Вс)"
+    else:
+        days_str = days_labels
+
+    return (
+        f"✏️ **Редактирование привычки «{name}»**\n\n"
+        f"🎯 **Название:** {name}\n"
+        f"⏱ **Цель:** {target} мин/день\n"
+        f"📅 **Дни активности / чек-ина:** {days_str}\n\n"
+        f"Выберите, что вы хотите изменить:"
+    )
+
+
+@router.callback_query(F.data.startswith("edit_habit_menu:"))
+async def cb_edit_habit_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Display edit menu for selected habit."""
+    await state.clear()
+    habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
+    text = format_habit_edit_card(habit)
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_habit_edit_menu_keyboard(habit_id),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_h_name:"))
+async def cb_edit_h_name(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user for new habit name."""
+    habit_id = int(callback.data.split(":")[1])
+    await state.set_state(HabitEditStates.waiting_for_name)
+    await state.update_data(editing_habit_id=habit_id)
+    await callback.message.edit_text(
+        "📝 **Введите новое название для этой привычки:**\n\n"
+        "_(Отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitEditStates.waiting_for_name)
+async def process_edit_habit_name(message: Message, state: FSMContext) -> None:
+    """Process updated habit name."""
+    new_name = (message.text or "").strip()
+    if not new_name or len(new_name) > 64:
+        await message.answer("⚠️ Название должно быть от 1 до 64 символов. Попробуйте еще раз или /cancel.")
+        return
+
+    data = await state.get_data()
+    habit_id = data.get("editing_habit_id")
+    await state.clear()
+
+    user_id = message.from_user.id
+    updated = await habits_repo.update_habit(habit_id, user_id, name=new_name)
+    if not updated:
+        await message.answer("⚠️ Привычка не найдена.", reply_markup=get_main_reply_keyboard())
+        return
+
+    text = format_habit_edit_card(updated)
+    await message.answer(
+        f"✅ Название успешно изменено на «**{new_name}**»!\n\n" + text,
+        reply_markup=get_habit_edit_menu_keyboard(habit_id),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("edit_h_time:"))
+async def cb_edit_h_time(callback: CallbackQuery) -> None:
+    """Display duration presets for habit target."""
+    habit_id = int(callback.data.split(":")[1])
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    cur_mins = habit["target_minutes"] if habit else 30
+
+    await callback.message.edit_text(
+        f"⏱ **Изменение ежедневной цели по времени**\n\n"
+        f"Текущая цель: **{cur_mins} мин/день**.\n\n"
+        f"Выберите готовое значение или введите своё число минут:",
+        reply_markup=get_habit_time_presets_keyboard(habit_id),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_h_time:"))
+async def cb_set_h_time(callback: CallbackQuery) -> None:
+    """Set habit duration from preset buttons."""
+    parts = callback.data.split(":")
+    habit_id = int(parts[1])
+    mins = int(parts[2])
+    user_id = callback.from_user.id
+
+    updated = await habits_repo.update_habit(habit_id, user_id, target_minutes=mins)
+    await callback.answer(f"Цель обновлена: {mins} мин! ✅", show_alert=True)
+
+    if updated:
+        text = format_habit_edit_card(updated)
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_habit_edit_menu_keyboard(habit_id),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("custom_h_time:"))
+async def cb_custom_h_time(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user to type custom minutes."""
+    habit_id = int(callback.data.split(":")[1])
+    await state.set_state(HabitEditStates.waiting_for_target_minutes)
+    await state.update_data(editing_habit_id=habit_id)
+    await callback.message.edit_text(
+        "✍️ **Введите желаемое целевое время в минутах (от 1 до 720):**\n\n"
+        "_(Отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitEditStates.waiting_for_target_minutes)
+async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
+    """Process custom target minutes input."""
+    text = (message.text or "").strip()
+    match = re.search(r"\d+", text)
+    if not match:
+        await message.answer("⚠️ Введите число минут (например: `45`) или /cancel.")
+        return
+
+    mins = int(match.group(0))
+    if mins < 1 or mins > 720:
+        await message.answer("⚠️ Время должно быть от 1 до 720 минут (до 12 часов).")
+        return
+
+    data = await state.get_data()
+    habit_id = data.get("editing_habit_id")
+    await state.clear()
+
+    user_id = message.from_user.id
+    updated = await habits_repo.update_habit(habit_id, user_id, target_minutes=mins)
+    if not updated:
+        await message.answer("⚠️ Привычка не найдена.", reply_markup=get_main_reply_keyboard())
+        return
+
+    card_text = format_habit_edit_card(updated)
+    await message.answer(
+        f"✅ Цель по времени успешно изменена на **{mins} мин/день**!\n\n" + card_text,
+        reply_markup=get_habit_edit_menu_keyboard(habit_id),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("edit_h_days:"))
+async def cb_edit_h_days(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open day selector keyboard for habit editing."""
+    habit_id = int(callback.data.split(":")[1])
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit:
+        await callback.answer("Привычка не найдена.")
+        return
+
+    days_str = habit.get("active_days", "1,2,3,4,5,6,7")
+    selected_days = set(int(d) for d in days_str.split(",") if d.isdigit())
+
+    await state.set_state(HabitEditStates.waiting_for_active_days)
+    await state.update_data(editing_habit_id=habit_id, edit_days=selected_days)
+
+    await callback.message.edit_text(
+        "📅 **Выберите дни, в которые привычка должна быть активна:**\n\n"
+        "В выбранные дни привычка будет отображаться в плане и проверяться в вечернем чек-ине.",
+        reply_markup=get_edit_days_selector_keyboard(habit_id, selected_days),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle_edit_day:"))
+async def cb_toggle_edit_day(callback: CallbackQuery, state: FSMContext) -> None:
+    """Toggle a day of the week in edit mode."""
+    parts = callback.data.split(":")
+    habit_id = int(parts[1])
+    day = int(parts[2])
+
+    data = await state.get_data()
+    days: Set[int] = data.get("edit_days", set())
+    if day in days:
+        days.remove(day)
+    else:
+        days.add(day)
+
+    await state.update_data(edit_days=days)
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=get_edit_days_selector_keyboard(habit_id, days)
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("preset_edit_days:"))
+async def cb_preset_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
+    """Set day preset in edit mode."""
+    parts = callback.data.split(":")
+    habit_id = int(parts[1])
+    preset = parts[2]
+
+    if preset == "all":
+        days = {1, 2, 3, 4, 5, 6, 7}
+    elif preset == "weekdays":
+        days = {1, 2, 3, 4, 5}
+    elif preset == "weekends":
+        days = {6, 7}
+    else:
+        days = {1, 2, 3, 4, 5, 6, 7}
+
+    await state.update_data(edit_days=days)
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=get_edit_days_selector_keyboard(habit_id, days)
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("save_edit_days:"))
+async def cb_save_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
+    """Save updated active days to database."""
+    habit_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    days: Set[int] = data.get("edit_days", set())
+
+    if not days:
+        await callback.answer("Выберите хотя бы один активный день!", show_alert=True)
+        return
+
+    days_str = ",".join(str(d) for d in sorted(days))
+    user_id = callback.from_user.id
+    await state.clear()
+
+    updated = await habits_repo.update_habit(habit_id, user_id, active_days=days_str)
+    await callback.answer("Дни активности успешно обновлены! ✅", show_alert=True)
+
+    if updated:
+        card_text = format_habit_edit_card(updated)
+        try:
+            await callback.message.edit_text(
+                card_text,
+                reply_markup=get_habit_edit_menu_keyboard(habit_id),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data == "habits_refresh")
+async def cb_habits_refresh(
+    callback: CallbackQuery,
+    user_data: Optional[Dict[str, Any]],
+    local_date: str,
+    local_weekday: int,
+    state: FSMContext,
+) -> None:
+    """Refresh habits list from inline back button."""
+    await state.clear()
+    await cmd_habits_list(callback.message, user_data=user_data, local_date=local_date, local_weekday=local_weekday)
+    await callback.answer("Обновлено")

@@ -15,10 +15,8 @@ Built with **Python 3.11+**, **aiogram 3.x**, **aiosqlite**, **APScheduler**, an
 
 2. **Habit Management & Active Days**:
    - Active day filtering (`1=Mon` through `7=Sun`), e.g., weekdays vs daily.
-   - Interactive multi-step creation (FSM) or one-line quick syntax:
-     - `/new Английский 45 weekdays`
-     - `/new Бег 30 1,3,5`
-     - `/new Чтение 20`
+   - Interactive multi-step creation (FSM) or one-line quick syntax (`/new Английский 45 weekdays`, `/new Чтение 20`).
+   - **Interactive Habit Editing (`✏️ Редактировать`)**: Change habit name, daily target duration (with presets like 15, 25, 30, 45, 60, 90 min or custom input), and active days / check-in schedule directly from habit cards.
    - Visual progress bars in habit list: `[■■■■□□□□] 30/60 мин (Осталось 30 мин) | 🔥 Стрик: 5 дней`.
    - **Streak Freeze (Заморозка дня)**: 1 freeze per week (resets on Monday). Protects habit streak from resetting if missed.
 

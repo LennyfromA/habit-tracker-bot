@@ -32,6 +32,43 @@ async def get_habit_by_id(habit_id: int) -> Optional[Dict[str, Any]]:
             return dict(row) if row else None
 
 
+async def update_habit(
+    habit_id: int,
+    user_id: int,
+    name: Optional[str] = None,
+    target_minutes: Optional[int] = None,
+    active_days: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Update habit fields (name, target_minutes, active_days) verifying user ownership."""
+    fields = []
+    params = []
+    if name is not None:
+        fields.append("name = ?")
+        params.append(name.strip())
+    if target_minutes is not None:
+        fields.append("target_minutes = ?")
+        params.append(max(1, target_minutes))
+    if active_days is not None:
+        fields.append("active_days = ?")
+        params.append(active_days.strip())
+
+    if not fields:
+        return await get_habit_by_id(habit_id)
+
+    params.extend([habit_id, user_id])
+    async with get_db() as db:
+        query = f"""
+        UPDATE habits
+        SET {", ".join(fields)}
+        WHERE id = ? AND user_id = ?
+        RETURNING *;
+        """
+        async with db.execute(query, tuple(params)) as cursor:
+            row = await cursor.fetchone()
+            await db.commit()
+            return dict(row) if row else None
+
+
 async def get_habits_for_user(user_id: int) -> List[Dict[str, Any]]:
     """Fetch all habits owned by the given user."""
     async with get_db() as db:

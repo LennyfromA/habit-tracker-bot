@@ -22,3 +22,11 @@ class TimerStates(StatesGroup):
     """States for active timer session reflections."""
 
     waiting_for_reflection = State()
+
+
+class HabitEditStates(StatesGroup):
+    """States for modifying existing habit properties."""
+
+    waiting_for_name = State()
+    waiting_for_target_minutes = State()
+    waiting_for_active_days = State()

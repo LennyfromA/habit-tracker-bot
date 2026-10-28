@@ -330,6 +330,29 @@ async def run_all_checks():
     assert "Все запланированные уведомления активны" in n_text_unmuted
     print("✅ 12. 3-Button menu structure, Settings Hub, and Notifications mute/unmute verified.")
 
+    # 13. Habit Editing Tests (Name, Time, Active Days)
+    upd1 = await habits_repo.update_habit(h_id, 101, name="Английский язык C1")
+    assert upd1 is not None and upd1["name"] == "Английский язык C1"
+    assert upd1["target_minutes"] == 45
+
+    upd2 = await habits_repo.update_habit(h_id, 101, target_minutes=60)
+    assert upd2 is not None and upd2["target_minutes"] == 60
+
+    upd3 = await habits_repo.update_habit(h_id, 101, active_days="1,2,3,4,5,6,7")
+    assert upd3 is not None and upd3["active_days"] == "1,2,3,4,5,6,7"
+
+    # Verify unauthorized user cannot update habit
+    unauth = await habits_repo.update_habit(h_id, 999, name="Hacked")
+    assert unauth is None
+    unchanged = await habits_repo.get_habit_by_id(h_id)
+    assert unchanged["name"] == "Английский язык C1"
+
+    from bot.handlers.habits import format_habit_edit_card
+    edit_card = format_habit_edit_card(unchanged)
+    assert "Английский язык C1" in edit_card
+    assert "60 мин/день" in edit_card
+    print("✅ 13. Habit editing (name, duration, days) and security authorization verified.")
+
     # Cleanup
     if os.path.exists(TEST_DB):
         os.remove(TEST_DB)
