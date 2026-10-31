@@ -79,24 +79,100 @@ def get_days_selector_keyboard(selected_days: Set[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3, row4])
 
 
+def get_habit_type_keyboard() -> InlineKeyboardMarkup:
+    """Select between duration-based habit and repetition/checklist habit."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="⏱ На время (с таймером)", callback_data="set_htype:duration"),
+        ],
+        [
+            InlineKeyboardButton(text="✅ Чек-лист / галочка (таблетки, уход...)", callback_data="set_htype:checklist"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_checklist_repeats_keyboard() -> InlineKeyboardMarkup:
+    """Select repetitions count per day for checklist habit."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="1 раз в день", callback_data="set_hreps:1"),
+            InlineKeyboardButton(text="2 раза (утро / вечер)", callback_data="set_hreps:2"),
+        ],
+        [
+            InlineKeyboardButton(text="3 раза в день", callback_data="set_hreps:3"),
+            InlineKeyboardButton(text="✍️ Своё число", callback_data="set_hreps:custom"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_checklist_reminders_keyboard(repeats: int = 1) -> InlineKeyboardMarkup:
+    """Select reminder time presets or skip."""
+    rows = []
+    if repeats == 1:
+        rows.append([
+            InlineKeyboardButton(text="🌅 Утро (09:00)", callback_data="set_hrem:09:00"),
+            InlineKeyboardButton(text="🌙 Вечер (21:00)", callback_data="set_hrem:21:00"),
+        ])
+    elif repeats == 2:
+        rows.append([
+            InlineKeyboardButton(text="🌅 09:00 + 🌙 21:00", callback_data="set_hrem:09:00,21:00"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text="🌅 08:30 + 🌙 20:30", callback_data="set_hrem:08:30,20:30"),
+        ])
+    elif repeats == 3:
+        rows.append([
+            InlineKeyboardButton(text="09:00, 14:00, 21:00", callback_data="set_hrem:09:00,14:00,21:00"),
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="🔕 Без напоминаний", callback_data="set_hrem:none"),
+        InlineKeyboardButton(text="✍️ Своё время", callback_data="set_hrem:custom"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_habit_reminder_push_keyboard(habit_id: int) -> InlineKeyboardMarkup:
+    """Buttons sent with interactive reminder notification."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="✅ Выполнено (+1)", callback_data=f"remind_check:{habit_id}"),
+            InlineKeyboardButton(text="⏰ Через 15 мин", callback_data=f"remind_snooze:{habit_id}"),
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 def get_habit_actions_keyboard(
     habit_id: int,
     remaining_minutes: int,
     is_completed: bool,
     is_frozen_today: bool,
     can_freeze: bool,
+    habit_type: str = "duration",
+    completed_repeats: int = 0,
+    target_repeats: int = 1,
 ) -> InlineKeyboardMarkup:
     """Keyboard for a single habit in habit list."""
     buttons: List[List[InlineKeyboardButton]] = []
 
-    if is_completed:
-        timer_text = "🎉 Выполнено на сегодня! (Ещё фокус?)"
-    elif remaining_minutes > 0:
-        timer_text = f"▶ Запустить таймер (Остаток: {remaining_minutes} мин)"
+    if habit_type == "checklist":
+        if is_completed:
+            btn_text = f"🎉 Выполнено ({completed_repeats}/{target_repeats}) 🎉"
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"already_done:{habit_id}")])
+        else:
+            btn_text = f"✅ Отметить выполнение ({completed_repeats}/{target_repeats})"
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"habit_check:{habit_id}")])
     else:
-        timer_text = "▶ Запустить таймер"
-
-    buttons.append([InlineKeyboardButton(text=timer_text, callback_data=f"timer_start:{habit_id}")])
+        if is_completed:
+            timer_text = "🎉 Выполнено на сегодня! (Ещё фокус?)"
+        elif remaining_minutes > 0:
+            timer_text = f"▶ Запустить таймер (Остаток: {remaining_minutes} мин)"
+        else:
+            timer_text = "▶ Запустить таймер"
+        buttons.append([InlineKeyboardButton(text=timer_text, callback_data=f"timer_start:{habit_id}")])
 
     second_row = [
         InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_habit_menu:{habit_id}"),
@@ -118,21 +194,84 @@ def get_habit_actions_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def get_habit_edit_menu_keyboard(habit_id: int) -> InlineKeyboardMarkup:
+def get_habit_edit_menu_keyboard(habit_id: int, habit_type: str = "duration") -> InlineKeyboardMarkup:
     """Menu with properties to edit for a habit."""
+    if habit_type == "checklist":
+        keyboard = [
+            [
+                InlineKeyboardButton(text="📝 Название", callback_data=f"edit_h_name:{habit_id}"),
+                InlineKeyboardButton(text="🎯 Кол-во раз", callback_data=f"edit_h_reps:{habit_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⏰ Напоминания", callback_data=f"edit_h_rem:{habit_id}"),
+                InlineKeyboardButton(text="📅 Дни недели", callback_data=f"edit_h_days:{habit_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Назад к привычкам", callback_data="habits_refresh"),
+            ],
+        ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton(text="📝 Название", callback_data=f"edit_h_name:{habit_id}"),
+                InlineKeyboardButton(text="⏱ Время (цель)", callback_data=f"edit_h_time:{habit_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📅 Дни недели / напоминания", callback_data=f"edit_h_days:{habit_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Назад к привычкам", callback_data="habits_refresh"),
+            ],
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_edit_checklist_repeats_keyboard(habit_id: int) -> InlineKeyboardMarkup:
+    """Keyboard to edit repeats count of checklist habit."""
     keyboard = [
         [
-            InlineKeyboardButton(text="📝 Название", callback_data=f"edit_h_name:{habit_id}"),
-            InlineKeyboardButton(text="⏱ Время (цель)", callback_data=f"edit_h_time:{habit_id}"),
+            InlineKeyboardButton(text="1 раз в день", callback_data=f"set_edit_reps:{habit_id}:1"),
+            InlineKeyboardButton(text="2 раза (утро / вечер)", callback_data=f"set_edit_reps:{habit_id}:2"),
         ],
         [
-            InlineKeyboardButton(text="📅 Дни недели / напоминания", callback_data=f"edit_h_days:{habit_id}"),
+            InlineKeyboardButton(text="3 раза в день", callback_data=f"set_edit_reps:{habit_id}:3"),
+            InlineKeyboardButton(text="✍️ Своё число", callback_data=f"custom_edit_reps:{habit_id}"),
         ],
         [
-            InlineKeyboardButton(text="🔙 Назад к привычкам", callback_data="habits_refresh"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data=f"edit_habit_menu:{habit_id}"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_edit_checklist_reminders_keyboard(habit_id: int, repeats: int = 1) -> InlineKeyboardMarkup:
+    """Keyboard to edit reminder times of checklist habit."""
+    rows = []
+    if repeats == 1:
+        rows.append([
+            InlineKeyboardButton(text="🌅 Утро (09:00)", callback_data=f"set_edit_rem:{habit_id}:09:00"),
+            InlineKeyboardButton(text="🌙 Вечер (21:00)", callback_data=f"set_edit_rem:{habit_id}:21:00"),
+        ])
+    elif repeats == 2:
+        rows.append([
+            InlineKeyboardButton(text="🌅 09:00 + 🌙 21:00", callback_data=f"set_edit_rem:{habit_id}:09:00,21:00"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text="🌅 08:30 + 🌙 20:30", callback_data=f"set_edit_rem:{habit_id}:08:30,20:30"),
+        ])
+    elif repeats == 3:
+        rows.append([
+            InlineKeyboardButton(text="09:00, 14:00, 21:00", callback_data=f"set_edit_rem:{habit_id}:09:00,14:00,21:00"),
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="🔕 Без напоминаний", callback_data=f"set_edit_rem:{habit_id}:none"),
+        InlineKeyboardButton(text="✍️ Своё время", callback_data=f"custom_edit_rem:{habit_id}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"edit_habit_menu:{habit_id}"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_habit_time_presets_keyboard(habit_id: int) -> InlineKeyboardMarkup:
@@ -220,8 +359,13 @@ def get_checkin_dashboard_keyboard(habits: List[dict]) -> InlineKeyboardMarkup:
     # Filter incomplete habits
     for h in habits:
         if not h.get("is_completed") and not h.get("is_frozen_today"):
-            remaining = max(0, h["target_minutes"] - h.get("spent_minutes", 0))
-            btn_text = f"✅ Выполнить: {h['name']} ({remaining} мин)"
+            if h.get("habit_type") == "checklist":
+                cur = h.get("completed_repeats", 0)
+                tgt = h.get("target_repeats", 1) or 1
+                btn_text = f"✅ Отметить: {h['name']} ({cur}/{tgt})"
+            else:
+                remaining = max(0, h["target_minutes"] - h.get("spent_minutes", 0))
+                btn_text = f"✅ Выполнить: {h['name']} ({remaining} мин)"
             rows.append(
                 [InlineKeyboardButton(text=btn_text, callback_data=f"checkin_complete:{h['id']}")]
             )

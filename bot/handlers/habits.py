@@ -11,11 +11,16 @@ from aiogram.types import CallbackQuery, Message
 from bot.database import habits_repo, users_repo
 from bot.keyboards.inline import (
     DAY_LABELS,
+    get_checklist_reminders_keyboard,
+    get_checklist_repeats_keyboard,
     get_days_selector_keyboard,
+    get_edit_checklist_reminders_keyboard,
+    get_edit_checklist_repeats_keyboard,
     get_edit_days_selector_keyboard,
     get_habit_actions_keyboard,
     get_habit_edit_menu_keyboard,
     get_habit_time_presets_keyboard,
+    get_habit_type_keyboard,
     get_habits_hub_keyboard,
 )
 from bot.keyboards.reply import get_main_reply_keyboard
@@ -106,24 +111,38 @@ async def cmd_habits_list(
         streak = h.get("streak_days", 0)
         is_completed = bool(h.get("is_completed"))
         is_frozen = bool(h.get("is_frozen_today"))
+        habit_type = h.get("habit_type", "duration")
+        target_repeats = h.get("target_repeats", 1) or 1
+        completed_repeats = h.get("completed_repeats", 0)
         remaining = max(0, target - spent)
 
-        bar = render_progress_bar(spent, target)
-
-        if is_frozen:
-            status_text = f"❄️ Заморожено на сегодня | 🔥 Стрик: {streak} дн."
-        elif is_completed:
-            status_text = f"{bar} {spent}/{target} мин (Выполнено! 🎉) | 🔥 Стрик: {streak} дн."
+        if habit_type == "checklist":
+            if is_frozen:
+                status_text = f"❄️ Заморожено на сегодня | 🔥 Стрик: {streak} дн."
+            elif is_completed:
+                status_text = f"✅ {completed_repeats}/{target_repeats} выполнено (Все закрыто! 🎉) | 🔥 Стрик: {streak} дн."
+            else:
+                remaining_reps = max(0, target_repeats - completed_repeats)
+                status_text = f"⏳ {completed_repeats}/{target_repeats} выполнено (Осталось: {remaining_reps}) | 🔥 Стрик: {streak} дн."
         else:
-            status_text = f"{bar} {spent}/{target} мин (Осталось {remaining} мин) | 🔥 Стрик: {streak} дн."
+            bar = render_progress_bar(spent, target)
+            if is_frozen:
+                status_text = f"❄️ Заморожено на сегодня | 🔥 Стрик: {streak} дн."
+            elif is_completed:
+                status_text = f"{bar} {spent}/{target} мин (Выполнено! 🎉) | 🔥 Стрик: {streak} дн."
+            else:
+                status_text = f"{bar} {spent}/{target} мин (Осталось {remaining} мин) | 🔥 Стрик: {streak} дн."
 
         card_text = f"🎯 **{name}**\n{status_text}"
         kb = get_habit_actions_keyboard(
             habit_id=habit_id,
-            remaining_minutes=remaining,
+            remaining_minutes=remaining if habit_type != "checklist" else 0,
             is_completed=is_completed,
             is_frozen_today=is_frozen,
             can_freeze=(freezes_left > 0),
+            habit_type=habit_type,
+            completed_repeats=completed_repeats,
+            target_repeats=target_repeats,
         )
         await message.answer(card_text, reply_markup=kb, parse_mode="Markdown")
 
@@ -146,10 +165,19 @@ async def cmd_habits_all(message: Message, local_date: str) -> None:
     text_lines = ["📋 **Все ваши привычки:**\n"]
     for h in habits:
         days = ",".join(DAY_LABELS.get(int(d), d) for d in h["active_days"].split(","))
-        text_lines.append(
-            f"• **{h['name']}** — цель {h['target_minutes']} мин/день\n"
-            f"  Дни: {days} | 🔥 Стрик: {h['streak_days']} дн."
-        )
+        htype = h.get("habit_type", "duration")
+        if htype == "checklist":
+            reps = h.get("target_repeats", 1)
+            rem = f" | ⏰ {h['reminder_times']}" if h.get("reminder_times") else ""
+            text_lines.append(
+                f"• **{h['name']}** — чек-лист ({reps} раз(а)/день{rem})\n"
+                f"  Дни: {days} | 🔥 Стрик: {h['streak_days']} дн."
+            )
+        else:
+            text_lines.append(
+                f"• **{h['name']}** — цель {h['target_minutes']} мин/день\n"
+                f"  Дни: {days} | 🔥 Стрик: {h['streak_days']} дн."
+            )
 
     await message.answer("\n\n".join(text_lines), parse_mode="Markdown")
 
@@ -243,7 +271,7 @@ async def btn_new_habit(message: Message, state: FSMContext) -> None:
 
 @router.message(HabitCreationStates.waiting_for_name)
 async def fsm_habit_name(message: Message, state: FSMContext) -> None:
-    """Save name and ask for daily target minutes."""
+    """Save name and ask for habit type."""
     name = (message.text or "").strip()
     if name.startswith("/"):
         return
@@ -252,10 +280,143 @@ async def fsm_habit_name(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(habit_name=name)
-    await state.set_state(HabitCreationStates.waiting_for_target_minutes)
+    await state.set_state(HabitCreationStates.waiting_for_type)
     await message.answer(
-        f"Отлично, «{name}»!\n\n"
-        "Шаг 2 из 3: Укажите ежедневную цель в минутах (например: `25`, `45`, `60`):",
+        f"Отлично, «**{name}**»!\n\n"
+        "Шаг 2 из 3: Выберите тип привычки:\n\n"
+        "• ⏱ **На время (таймер)** — засекать минуты и таймер фокуса (спорт, чтение, работа).\n"
+        "• ✅ **Чек-лист (галочка)** — без таймера, регулярные действия (таблетки, уход, чистка зубов).",
+        reply_markup=get_habit_type_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(HabitCreationStates.waiting_for_type, F.data.startswith("set_htype:"))
+async def cb_set_habit_type(callback: CallbackQuery, state: FSMContext) -> None:
+    """Handle habit type selection."""
+    htype = callback.data.split(":")[1]
+    await state.update_data(habit_type=htype)
+
+    if htype == "checklist":
+        await state.update_data(target_minutes=0)
+        await state.set_state(HabitCreationStates.waiting_for_repeats)
+        await callback.message.edit_text(
+            "📋 **Чек-лист привычка**\n\n"
+            "Сколько раз в день нужно выполнять это действие?",
+            reply_markup=get_checklist_repeats_keyboard(),
+            parse_mode="Markdown",
+        )
+    else:
+        await state.update_data(target_repeats=1, reminder_times=None)
+        await state.set_state(HabitCreationStates.waiting_for_target_minutes)
+        await callback.message.edit_text(
+            "⏱ **Привычка с таймером**\n\n"
+            "Укажите ежедневную цель в минутах (например: `25`, `45`, `60`):",
+            parse_mode="Markdown",
+        )
+    await callback.answer()
+
+
+@router.callback_query(HabitCreationStates.waiting_for_repeats, F.data.startswith("set_hreps:"))
+async def cb_set_habit_repeats(callback: CallbackQuery, state: FSMContext) -> None:
+    """Handle repeats count selection for checklist habit."""
+    val = callback.data.split(":")[1]
+    if val == "custom":
+        await callback.message.edit_text(
+            "✍️ Введите количество повторений в день числом (от 1 до 20):\n\n"
+            "_(Отправьте /cancel для отмены)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    repeats = int(val)
+    await state.update_data(target_repeats=repeats)
+    await state.set_state(HabitCreationStates.waiting_for_reminder_time)
+    await callback.message.edit_text(
+        f"🎯 Цель: **{repeats} раз(а) в день**.\n\n"
+        "Хотите настроить время напоминаний? (Необязательно):",
+        reply_markup=get_checklist_reminders_keyboard(repeats=repeats),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitCreationStates.waiting_for_repeats)
+async def fsm_custom_habit_repeats(message: Message, state: FSMContext) -> None:
+    """Process custom number of repeats input."""
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
+    if not text.isdigit() or int(text) < 1 or int(text) > 20:
+        await message.answer("⚠️ Введите число от 1 до 20 (или /cancel):")
+        return
+
+    repeats = int(text)
+    await state.update_data(target_repeats=repeats)
+    await state.set_state(HabitCreationStates.waiting_for_reminder_time)
+    await message.answer(
+        f"🎯 Цель: **{repeats} раз(а) в день**.\n\n"
+        "Хотите настроить время напоминаний? (Необязательно):",
+        reply_markup=get_checklist_reminders_keyboard(repeats=repeats),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(HabitCreationStates.waiting_for_reminder_time, F.data.startswith("set_hrem:"))
+async def cb_set_habit_reminder(callback: CallbackQuery, state: FSMContext) -> None:
+    """Handle reminder time preset or prompt for custom input."""
+    rem_val = callback.data.split(":", 1)[1]
+    if rem_val == "custom":
+        await callback.message.edit_text(
+            "✍️ Введите время напоминания (например: `09:00` или через запятую `09:00, 21:00`):\n\n"
+            "_(Отправьте /cancel для отмены)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    reminder_times = None if rem_val == "none" else rem_val
+    await state.update_data(reminder_times=reminder_times)
+
+    selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
+    await state.update_data(selected_days=list(selected_days))
+    await state.set_state(HabitCreationStates.waiting_for_active_days)
+
+    rem_note = f"⏰ Напоминания: **{reminder_times}**\n\n" if reminder_times else "🔕 Без напоминаний\n\n"
+    await callback.message.edit_text(
+        f"{rem_note}"
+        "Шаг 3 из 3: Выберите дни недели, в которые привычка должна быть активна:",
+        reply_markup=get_days_selector_keyboard(selected_days),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitCreationStates.waiting_for_reminder_time)
+async def fsm_custom_habit_reminder(message: Message, state: FSMContext) -> None:
+    """Process custom reminder times text."""
+    raw_text = (message.text or "").strip()
+    if raw_text.startswith("/"):
+        return
+
+    matches = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw_text)
+    if not matches:
+        await message.answer(
+            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например `09:00` или `09:00, 21:00`) или /cancel:"
+        )
+        return
+
+    times = [f"{int(h):02d}:{m}" for h, m in matches]
+    reminder_times = ",".join(times)
+    await state.update_data(reminder_times=reminder_times)
+
+    selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
+    await state.update_data(selected_days=list(selected_days))
+    await state.set_state(HabitCreationStates.waiting_for_active_days)
+
+    await message.answer(
+        f"⏰ Напоминания установлены: **{reminder_times}**\n\n"
+        "Шаг 3 из 3: Выберите дни недели, в которые привычка должна быть активна:",
+        reply_markup=get_days_selector_keyboard(selected_days),
         parse_mode="Markdown",
     )
 
@@ -271,7 +432,6 @@ async def fsm_habit_target(message: Message, state: FSMContext) -> None:
         return
 
     target_min = int(text)
-    # Default to all days selected: {1, 2, 3, 4, 5, 6, 7}
     selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
     await state.update_data(target_minutes=target_min, selected_days=list(selected_days))
     await state.set_state(HabitCreationStates.waiting_for_active_days)
@@ -329,6 +489,9 @@ async def cb_finish_habit_creation(callback: CallbackQuery, state: FSMContext) -
     data = await state.get_data()
     name = data.get("habit_name", "Новая привычка")
     target_min = data.get("target_minutes", 30)
+    habit_type = data.get("habit_type", "duration")
+    target_repeats = data.get("target_repeats", 1)
+    reminder_times = data.get("reminder_times")
     selected_days = sorted(data.get("selected_days", [1, 2, 3, 4, 5, 6, 7]))
     active_days_str = ",".join(str(d) for d in selected_days)
 
@@ -337,22 +500,151 @@ async def cb_finish_habit_creation(callback: CallbackQuery, state: FSMContext) -
         name=name,
         target_minutes=target_min,
         active_days=active_days_str,
+        habit_type=habit_type,
+        target_repeats=target_repeats,
+        reminder_times=reminder_times,
     )
     await state.clear()
 
     days_str = ", ".join(DAY_LABELS.get(d, str(d)) for d in selected_days)
+    if habit_type == "checklist":
+        rem_str = f"⏰ Напоминания: **{reminder_times}**\n" if reminder_times else "🔕 Без напоминаний\n"
+        details_str = (
+            f"📋 Тип: **Чек-лист (повторения)**\n"
+            f"🔢 Цель: **{target_repeats} раз(а)** в день\n"
+            f"{rem_str}"
+        )
+    else:
+        details_str = f"⏱ Цель: **{target_min} мин** в день\n"
+
     await callback.message.edit_text(
         f"🎉 **Привычка успешно создана!**\n\n"
         f"🎯 Название: **{name}**\n"
-        f"⏱ Цель: **{target_min} мин** в день\n"
+        f"{details_str}"
         f"📅 Активные дни: **{days_str}**",
         parse_mode="Markdown",
     )
     await callback.message.answer(
-        "Вы можете сразу запустить фокус-сессию в меню «📋 Мои привычки»!",
+        "Вы можете отметить выполнение в меню «📋 Мои привычки»!",
         reply_markup=get_main_reply_keyboard(),
     )
     await callback.answer()
+
+
+# ---------------------------------------------------------
+# Checklist Progress & Reminder Callbacks
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("habit_check:"))
+async def cb_habit_check(
+    callback: CallbackQuery,
+    local_date: str,
+) -> None:
+    """Increment repetition count for checklist habit from habit list."""
+    habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
+    cur_reps, tgt_reps, is_completed = await habits_repo.increment_habit_repeat(
+        habit_id=habit_id,
+        user_id=user_id,
+        logged_date=local_date,
+    )
+
+    streak = habit.get("streak_days", 0)
+    if is_completed:
+        status_text = f"✅ {cur_reps}/{tgt_reps} выполнено (Все закрыто! 🎉) | 🔥 Стрик: {streak} дн."
+        toast = f"«{habit['name']}» — цель на сегодня выполнена! 🎉"
+    else:
+        remaining = max(0, tgt_reps - cur_reps)
+        status_text = f"⏳ {cur_reps}/{tgt_reps} выполнено (Осталось: {remaining}) | 🔥 Стрик: {streak} дн."
+        toast = f"«{habit['name']}» — отмечено (+1)! ({cur_reps}/{tgt_reps})"
+
+    user = await users_repo.get_user(user_id)
+    freezes_left = user.get("freezes_left", 0) if user else 0
+
+    card_text = f"🎯 **{habit['name']}**\n{status_text}"
+    kb = get_habit_actions_keyboard(
+        habit_id=habit_id,
+        remaining_minutes=0,
+        is_completed=is_completed,
+        is_frozen_today=bool(habit.get("is_frozen_today")),
+        can_freeze=(freezes_left > 0),
+        habit_type="checklist",
+        completed_repeats=cur_reps,
+        target_repeats=tgt_reps,
+    )
+
+    try:
+        await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+    await callback.answer(toast)
+
+
+@router.callback_query(F.data.startswith("already_done:"))
+async def cb_already_done(callback: CallbackQuery) -> None:
+    """Inform user that checklist habit is already completed today."""
+    await callback.answer("Привычка уже полностью закрыта на сегодня! Отличная работа! 🎉", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("remind_check:"))
+async def cb_remind_check(
+    callback: CallbackQuery,
+    local_date: str,
+) -> None:
+    """User clicked [ ✅ Выполнено (+1) ] on interactive reminder notification."""
+    habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit:
+        await callback.answer("Привычка не найдена.")
+        return
+
+    cur_reps, tgt_reps, is_completed = await habits_repo.increment_habit_repeat(
+        habit_id=habit_id,
+        user_id=user_id,
+        logged_date=local_date,
+    )
+
+    compl_msg = "Цель на сегодня достигнута! 🎉" if is_completed else f"Прогресс: {cur_reps}/{tgt_reps}"
+    try:
+        await callback.message.edit_text(
+            f"✅ **«{habit['name']}» отмечено!**\n\n"
+            f"📊 {compl_msg}\n"
+            f"🔥 Стрик: {habit['streak_days']} дн. Так держать!",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer("Отмечено! (+1)")
+
+
+@router.callback_query(F.data.startswith("remind_snooze:"))
+async def cb_remind_snooze(callback: CallbackQuery) -> None:
+    """User clicked [ ⏰ Через 15 мин ] on interactive reminder notification."""
+    habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    name = habit["name"] if habit else "Привычка"
+
+    await habits_repo.add_habit_snooze(habit_id, user_id, snooze_seconds=900)
+
+    try:
+        await callback.message.edit_text(
+            f"⏰ **Напоминание по «{name}» отложено на 15 минут.**\n\n"
+            "Бот пришлет повторное уведомление.",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer("Отложено на 15 минут.")
 
 
 # ---------------------------------------------------------
@@ -457,7 +749,7 @@ async def cb_habits_hub_stats(callback: CallbackQuery, local_date: str) -> None:
 def format_habit_edit_card(habit: Dict[str, Any]) -> str:
     """Format markdown summary of habit settings for the edit dashboard."""
     name = habit["name"]
-    target = habit["target_minutes"]
+    htype = habit.get("habit_type", "duration")
     active_days_raw = str(habit.get("active_days") or "1,2,3,4,5,6,7")
     days_labels = ", ".join(DAY_LABELS.get(int(d), str(d)) for d in active_days_raw.split(",") if d.isdigit())
     if active_days_raw == "1,2,3,4,5,6,7":
@@ -469,11 +761,20 @@ def format_habit_edit_card(habit: Dict[str, Any]) -> str:
     else:
         days_str = days_labels
 
+    if htype == "checklist":
+        reps = habit.get("target_repeats", 1) or 1
+        rem = habit.get("reminder_times") or "Без напоминаний"
+        type_str = f"📋 **Тип:** Чек-лист (повторения)\n🎯 **Цель:** {reps} раз(а) в день\n⏰ **Напоминания:** {rem}"
+    else:
+        target = habit["target_minutes"]
+        type_str = f"⏱ **Тип:** С таймером\n🎯 **Цель:** {target} мин/день"
+
     return (
         f"✏️ **Редактирование привычки «{name}»**\n\n"
         f"🎯 **Название:** {name}\n"
-        f"⏱ **Цель:** {target} мин/день\n"
-        f"📅 **Дни активности / чек-ина:** {days_str}\n\n"
+        f"{type_str}\n"
+        f"📅 **Дни активности / чек-ина:** {days_str}\n"
+        f"🔥 **Текущий стрик:** {habit.get('streak_days', 0)} дн.\n\n"
         f"Выберите, что вы хотите изменить:"
     )
 
@@ -493,7 +794,7 @@ async def cb_edit_habit_menu(callback: CallbackQuery, state: FSMContext) -> None
     try:
         await callback.message.edit_text(
             text,
-            reply_markup=get_habit_edit_menu_keyboard(habit_id),
+            reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=habit.get("habit_type", "duration")),
             parse_mode="Markdown",
         )
     except Exception:
@@ -538,7 +839,7 @@ async def process_edit_habit_name(message: Message, state: FSMContext) -> None:
     text = format_habit_edit_card(updated)
     await message.answer(
         f"✅ Название успешно изменено на «**{new_name}**»!\n\n" + text,
-        reply_markup=get_habit_edit_menu_keyboard(habit_id),
+        reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
         parse_mode="Markdown",
     )
 
@@ -576,7 +877,7 @@ async def cb_set_h_time(callback: CallbackQuery) -> None:
         try:
             await callback.message.edit_text(
                 text,
-                reply_markup=get_habit_edit_menu_keyboard(habit_id),
+                reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
                 parse_mode="Markdown",
             )
         except Exception:
@@ -626,7 +927,178 @@ async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
     card_text = format_habit_edit_card(updated)
     await message.answer(
         f"✅ Цель по времени успешно изменена на **{mins} мин/день**!\n\n" + card_text,
-        reply_markup=get_habit_edit_menu_keyboard(habit_id),
+        reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------------------
+# Checklist Habit Editing: Repeats & Reminders
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("edit_h_reps:"))
+async def cb_edit_h_reps(callback: CallbackQuery) -> None:
+    """Display repeats presets for checklist habit."""
+    habit_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        "🎯 **Изменение количества повторений в день:**\n\n"
+        "Выберите готовое значение или укажите своё число:",
+        reply_markup=get_edit_checklist_repeats_keyboard(habit_id),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_edit_reps:"))
+async def cb_set_edit_reps(callback: CallbackQuery) -> None:
+    """Set checklist repeats from preset."""
+    parts = callback.data.split(":")
+    habit_id = int(parts[1])
+    reps = int(parts[2])
+    user_id = callback.from_user.id
+
+    updated = await habits_repo.update_habit(habit_id, user_id, target_repeats=reps)
+    await callback.answer(f"Цель обновлена: {reps} раз(а) в день! ✅", show_alert=True)
+    if updated:
+        card_text = format_habit_edit_card(updated)
+        try:
+            await callback.message.edit_text(
+                card_text,
+                reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("custom_edit_reps:"))
+async def cb_custom_edit_reps(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user to type custom repeats."""
+    habit_id = int(callback.data.split(":")[1])
+    await state.set_state(HabitEditStates.waiting_for_repeats)
+    await state.update_data(editing_habit_id=habit_id)
+    await callback.message.edit_text(
+        "✍️ **Введите желаемое количество повторений в день (от 1 до 20):**\n\n"
+        "_(Отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitEditStates.waiting_for_repeats)
+async def process_edit_habit_repeats(message: Message, state: FSMContext) -> None:
+    """Process custom repeats input."""
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
+    if not text.isdigit() or int(text) < 1 or int(text) > 20:
+        await message.answer("⚠️ Введите число от 1 до 20 или /cancel.")
+        return
+
+    reps = int(text)
+    data = await state.get_data()
+    habit_id = data.get("editing_habit_id")
+    await state.clear()
+
+    user_id = message.from_user.id
+    updated = await habits_repo.update_habit(habit_id, user_id, target_repeats=reps)
+    if not updated:
+        await message.answer("⚠️ Привычка не найдена.", reply_markup=get_main_reply_keyboard())
+        return
+
+    card_text = format_habit_edit_card(updated)
+    await message.answer(
+        f"✅ Количество повторений успешно изменено на **{reps} раз(а)/день**!\n\n" + card_text,
+        reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("edit_h_rem:"))
+async def cb_edit_h_rem(callback: CallbackQuery) -> None:
+    """Display reminders presets for checklist habit."""
+    habit_id = int(callback.data.split(":")[1])
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    reps = habit.get("target_repeats", 1) if habit else 1
+
+    await callback.message.edit_text(
+        "⏰ **Настройка времени напоминаний:**\n\n"
+        "Выберите готовый вариант или введите своё время:",
+        reply_markup=get_edit_checklist_reminders_keyboard(habit_id, repeats=reps),
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_edit_rem:"))
+async def cb_set_edit_rem(callback: CallbackQuery) -> None:
+    """Set checklist reminder times from preset."""
+    parts = callback.data.split(":", 2)
+    habit_id = int(parts[1])
+    rem_val = parts[2]
+    user_id = callback.from_user.id
+
+    reminder_times = "" if rem_val == "none" else rem_val
+    updated = await habits_repo.update_habit(habit_id, user_id, reminder_times=reminder_times)
+    toast = "Напоминания отключены." if not reminder_times else f"Напоминания установлены: {reminder_times}"
+    await callback.answer(toast, show_alert=True)
+    if updated:
+        card_text = format_habit_edit_card(updated)
+        try:
+            await callback.message.edit_text(
+                card_text,
+                reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("custom_edit_rem:"))
+async def cb_custom_edit_rem(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user to type custom reminder times."""
+    habit_id = int(callback.data.split(":")[1])
+    await state.set_state(HabitEditStates.waiting_for_reminder_time)
+    await state.update_data(editing_habit_id=habit_id)
+    await callback.message.edit_text(
+        "✍️ **Введите время напоминания в формате ЧЧ:ММ (например `09:00` или через запятую `09:00, 21:00`):**\n\n"
+        "_(Отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(HabitEditStates.waiting_for_reminder_time)
+async def process_edit_habit_reminder_time(message: Message, state: FSMContext) -> None:
+    """Process custom reminder times input."""
+    raw_text = (message.text or "").strip()
+    if raw_text.startswith("/"):
+        return
+
+    matches = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw_text)
+    if not matches:
+        await message.answer(
+            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например `09:00` или `09:00, 21:00`) или /cancel:"
+        )
+        return
+
+    times = [f"{int(h):02d}:{m}" for h, m in matches]
+    reminder_times = ",".join(times)
+
+    data = await state.get_data()
+    habit_id = data.get("editing_habit_id")
+    await state.clear()
+
+    user_id = message.from_user.id
+    updated = await habits_repo.update_habit(habit_id, user_id, reminder_times=reminder_times)
+    if not updated:
+        await message.answer("⚠️ Привычка не найдена.", reply_markup=get_main_reply_keyboard())
+        return
+
+    card_text = format_habit_edit_card(updated)
+    await message.answer(
+        f"✅ Время напоминаний установлено: **{reminder_times}**!\n\n" + card_text,
+        reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
         parse_mode="Markdown",
     )
 
@@ -728,7 +1200,7 @@ async def cb_save_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
         try:
             await callback.message.edit_text(
                 card_text,
-                reply_markup=get_habit_edit_menu_keyboard(habit_id),
+                reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
                 parse_mode="Markdown",
             )
         except Exception:

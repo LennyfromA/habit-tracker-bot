@@ -3,14 +3,14 @@
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
-from bot.database import users_repo
+from bot.database import habits_repo, users_repo
 from bot.keyboards.inline import (
     get_checkin_time_inline_keyboard,
     get_mute_duration_keyboard,
@@ -239,7 +239,10 @@ def build_settings_view(user: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup
     return text, get_settings_hub_keyboard()
 
 
-def build_notifications_view(user: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+def build_notifications_view(
+    user: Dict[str, Any],
+    habits: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, InlineKeyboardMarkup]:
     """Assemble text and keyboard for all notifications list."""
     offset = user.get("utc_offset", 3)
     ci_time = user.get("checkin_time", "21:00")
@@ -261,12 +264,24 @@ def build_notifications_view(user: Dict[str, Any]) -> Tuple[str, InlineKeyboardM
     else:
         status_line = "🔔 **Все запланированные уведомления активны.**"
 
+    habit_reminders = []
+    if habits:
+        for h in habits:
+            if h.get("habit_type") == "checklist" and h.get("reminder_times"):
+                reps = h.get("target_repeats", 1)
+                habit_reminders.append(f"  • «{h['name']}» ({reps}x/день): `{h['reminder_times']}`")
+
+    habits_str = ""
+    if habit_reminders:
+        habits_str = f"4. 💊 **Напоминания по привычкам**:\n" + "\n".join(habit_reminders) + "\n"
+
     text = (
         "🔔 **Управление всеми уведомлениями**\n\n"
         "Здесь отображаются все регулярные напоминания и их расписание:\n\n"
         f"1. 🌅 **Утреннее взвешивание**: {w_str}\n"
         f"2. 🌙 **Вечерний чек-ин**: Включено (каждый вечер в `{ci_time}`)\n"
-        f"3. ⏱ **Таймеры фокуса**: Уведомление со звуком при завершении сессии\n\n"
+        f"3. ⏱ **Таймеры фокуса**: Уведомление со звуком при завершении сессии\n"
+        f"{habits_str}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"{status_line}"
     )
@@ -300,7 +315,8 @@ async def cb_settings_main(callback: CallbackQuery) -> None:
 async def cb_settings_notifications(callback: CallbackQuery) -> None:
     """Display all notifications dashboard."""
     user = await users_repo.get_user(callback.from_user.id)
-    text, kb = build_notifications_view(user or {})
+    habits = await habits_repo.get_habits_for_user(callback.from_user.id)
+    text, kb = build_notifications_view(user or {}, habits=habits)
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
@@ -342,7 +358,8 @@ async def cb_notif_mute_duration(callback: CallbackQuery) -> None:
     await callback.answer(alert_msg, show_alert=True)
 
     user = await users_repo.get_user(user_id)
-    text, kb = build_notifications_view(user or {})
+    habits = await habits_repo.get_habits_for_user(user_id)
+    text, kb = build_notifications_view(user or {}, habits=habits)
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
@@ -357,7 +374,8 @@ async def cb_notif_unmute(callback: CallbackQuery) -> None:
     await callback.answer("Уведомления снова включены! 🔔", show_alert=True)
 
     user = await users_repo.get_user(user_id)
-    text, kb = build_notifications_view(user or {})
+    habits = await habits_repo.get_habits_for_user(user_id)
+    text, kb = build_notifications_view(user or {}, habits=habits)
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:

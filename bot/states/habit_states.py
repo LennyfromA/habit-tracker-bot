@@ -14,7 +14,10 @@ class HabitCreationStates(StatesGroup):
     """States for interactive multi-step habit creation."""
 
     waiting_for_name = State()
+    waiting_for_type = State()
     waiting_for_target_minutes = State()
+    waiting_for_repeats = State()
+    waiting_for_reminder_time = State()
     waiting_for_active_days = State()
 
 
@@ -29,4 +32,6 @@ class HabitEditStates(StatesGroup):
 
     waiting_for_name = State()
     waiting_for_target_minutes = State()
+    waiting_for_repeats = State()
+    waiting_for_reminder_time = State()
     waiting_for_active_days = State()

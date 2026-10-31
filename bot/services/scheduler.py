@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.database import habits_repo, timers_repo, users_repo
-from bot.keyboards.inline import get_checkin_dashboard_keyboard
+from bot.keyboards.inline import get_checkin_dashboard_keyboard, get_habit_reminder_push_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,85 @@ async def check_midnight_resets() -> None:
             await users_repo.update_user_last_midnight_date(user_id, local_date)
 
 
+async def check_habit_reminders(bot: Bot) -> None:
+    """Send habit reminder pushes and trigger due snoozed notifications."""
+    now_ts = int(time.time())
+    now_utc = datetime.now(timezone.utc)
+
+    # 1. Process due snoozes
+    due_snoozes = await habits_repo.get_due_snoozes(now_ts)
+    for snooze in due_snoozes:
+        user_id = snooze["user_id"]
+        habit_id = snooze["habit_id"]
+        name = snooze["name"]
+        snooze_id = snooze["snooze_id"]
+
+        user = await users_repo.get_user(user_id)
+        muted_until = (user or {}).get("notifications_muted_until", 0) or 0
+        if muted_until <= now_ts:
+            try:
+                kb = get_habit_reminder_push_keyboard(habit_id)
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⏰ **Напоминание (после откладывания):** «{name}»!\n\n"
+                        f"Время выполнить действие и подтвердить результат."
+                    ),
+                    reply_markup=kb,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning("Failed to send snoozed reminder to %s: %s", user_id, e)
+
+        await habits_repo.delete_snooze(snooze_id)
+
+    # 2. Process scheduled habit reminders
+    users = await users_repo.get_all_users()
+    for user in users:
+        muted_until = user.get("notifications_muted_until", 0) or 0
+        if muted_until > now_ts:
+            continue
+
+        user_id = user["user_id"]
+        offset = user.get("utc_offset", 3)
+        local_now = now_utc + timedelta(hours=offset)
+        local_hm = local_now.strftime("%H:%M")
+        local_date = local_now.strftime("%Y-%m-%d")
+        weekday = local_now.isoweekday()
+
+        habits = await habits_repo.get_today_habits_with_status(user_id, local_date, weekday)
+        for h in habits:
+            if h.get("habit_type") != "checklist":
+                continue
+            rem_str = h.get("reminder_times")
+            if not rem_str:
+                continue
+
+            scheduled_times = [t.strip() for t in rem_str.split(",") if t.strip()]
+            for rem_time in scheduled_times:
+                if local_hm == rem_time:
+                    already_sent = await habits_repo.was_habit_reminder_sent(h["id"], local_date, rem_time)
+                    if not already_sent:
+                        cur_reps = h.get("completed_repeats", 0)
+                        tgt_reps = h.get("target_repeats", 1) or 1
+                        try:
+                            kb = get_habit_reminder_push_keyboard(h["id"])
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=(
+                                    f"🔔 **Напоминание по привычке:** «{h['name']}»!\n\n"
+                                    f"📊 Прогресс за сегодня: **{cur_reps}/{tgt_reps}**\n\n"
+                                    f"Не забудьте выполнить действие!"
+                                ),
+                                reply_markup=kb,
+                                parse_mode="Markdown",
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to send habit reminder to %s: %s", user_id, e)
+
+                        await habits_repo.record_habit_reminder_sent(h["id"], user_id, local_date, rem_time)
+
+
 async def global_tick(bot: Bot) -> None:
     """Tick executed every 60 seconds by APScheduler."""
     try:
@@ -238,6 +317,11 @@ async def global_tick(bot: Bot) -> None:
         await check_weight_reminders(bot)
     except Exception as e:
         logger.error("Error in weight reminders: %s", e, exc_info=True)
+
+    try:
+        await check_habit_reminders(bot)
+    except Exception as e:
+        logger.error("Error in habit reminders: %s", e, exc_info=True)
 
     try:
         await check_midnight_resets()

@@ -33,15 +33,26 @@ def format_checkin_text(
     ]
 
     for h in habits:
-        spent = h.get("spent_minutes", 0)
-        target = h["target_minutes"]
-        if h.get("is_completed"):
-            lines.append(f"✅ «{h['name']}» — {spent}/{target} мин (Выполнено)")
-        elif h.get("is_frozen_today"):
-            lines.append(f"❄️ «{h['name']}» — Заморожено сегодня")
+        if h.get("habit_type") == "checklist":
+            cur = h.get("completed_repeats", 0)
+            tgt = h.get("target_repeats", 1) or 1
+            if h.get("is_completed"):
+                lines.append(f"✅ «{h['name']}» — {cur}/{tgt} раз (Выполнено)")
+            elif h.get("is_frozen_today"):
+                lines.append(f"❄️ «{h['name']}» — Заморожено сегодня")
+            else:
+                remaining = max(0, tgt - cur)
+                lines.append(f"⏳ «{h['name']}» — {cur}/{tgt} раз (Осталось: {remaining})")
         else:
-            remaining = max(0, target - spent)
-            lines.append(f"⏳ «{h['name']}» — {spent}/{target} мин (Осталось: {remaining} мин)")
+            spent = h.get("spent_minutes", 0)
+            target = h["target_minutes"]
+            if h.get("is_completed"):
+                lines.append(f"✅ «{h['name']}» — {spent}/{target} мин (Выполнено)")
+            elif h.get("is_frozen_today"):
+                lines.append(f"❄️ «{h['name']}» — Заморожено сегодня")
+            else:
+                remaining = max(0, target - spent)
+                lines.append(f"⏳ «{h['name']}» — {spent}/{target} мин (Осталось: {remaining} мин)")
 
     if nutrition_summary and nutrition_summary.get("meal_count", 0) > 0:
         cals = nutrition_summary.get("total_calories", 0)
@@ -109,12 +120,25 @@ async def cb_checkin_complete(
         return
 
     # Mark as completed
-    await habits_repo.set_habit_completed_manual(
-        habit_id=habit_id,
-        user_id=user_id,
-        logged_date=local_date,
-        target_minutes=habit["target_minutes"],
-    )
+    if habit.get("habit_type") == "checklist":
+        cur_reps, tgt_reps, is_completed = await habits_repo.increment_habit_repeat(
+            habit_id=habit_id,
+            user_id=user_id,
+            logged_date=local_date,
+        )
+        toast_msg = (
+            f"«{habit['name']}» ({cur_reps}/{tgt_reps})! 🎉"
+            if is_completed
+            else f"«{habit['name']}» отмечено (+1)! (Всего {cur_reps}/{tgt_reps})"
+        )
+    else:
+        await habits_repo.set_habit_completed_manual(
+            habit_id=habit_id,
+            user_id=user_id,
+            logged_date=local_date,
+            target_minutes=habit["target_minutes"],
+        )
+        toast_msg = f"«{habit['name']}» отмечена как выполненная! 🎉"
 
     # Refresh habits list
     habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
@@ -130,7 +154,7 @@ async def cb_checkin_complete(
     except Exception:
         pass
 
-    await callback.answer(f"«{habit['name']}» отмечена как выполненная! 🎉")
+    await callback.answer(toast_msg)
 
 
 @router.callback_query(F.data == "checkin_finish")

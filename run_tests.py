@@ -353,6 +353,74 @@ async def run_all_checks():
     assert "60 мин/день" in edit_card
     print("✅ 13. Habit editing (name, duration, days) and security authorization verified.")
 
+    # 14. Checklist / Repetition Habits Tests (Pills, Hair Care, Reminders & Snooze)
+    chk_id = await habits_repo.create_habit(
+        user_id=101,
+        name="Витамин D и Омега-3",
+        target_minutes=0,
+        active_days="1,2,3,4,5,6,7",
+        habit_type="checklist",
+        target_repeats=2,
+        reminder_times="09:00,21:00",
+    )
+    assert chk_id > 0
+    chk = await habits_repo.get_habit_by_id(chk_id)
+    assert chk["habit_type"] == "checklist"
+    assert chk["target_repeats"] == 2
+    assert chk["reminder_times"] == "09:00,21:00"
+
+    # Today status check
+    chk_today = await habits_repo.get_today_habits_with_status(101, "2026-10-31", 6)
+    found_chk = [h for h in chk_today if h["id"] == chk_id][0]
+    assert found_chk["completed_repeats"] == 0
+    assert found_chk["is_completed"] == 0
+
+    # Increment 1 repeat (1/2, not completed)
+    cur_reps, tgt_reps, is_done = await habits_repo.increment_habit_repeat(chk_id, 101, "2026-10-31")
+    assert cur_reps == 1
+    assert tgt_reps == 2
+    assert is_done is False
+
+    # Check checkin text formatting
+    from bot.handlers.checkin import format_checkin_text
+    chk_today_1 = await habits_repo.get_today_habits_with_status(101, "2026-10-31", 6)
+    ci_text_1 = format_checkin_text(chk_today_1, "2026-10-31")
+    assert "1/2 раз (Осталось: 1)" in ci_text_1
+
+    # Increment 2nd repeat (2/2, completed!)
+    cur_reps, tgt_reps, is_done = await habits_repo.increment_habit_repeat(chk_id, 101, "2026-10-31")
+    assert cur_reps == 2
+    assert is_done is True
+
+    chk_today_2 = await habits_repo.get_today_habits_with_status(101, "2026-10-31", 6)
+    ci_text_2 = format_checkin_text(chk_today_2, "2026-10-31")
+    assert "2/2 раз (Выполнено)" in ci_text_2
+
+    # Reminder logs & Snooze
+    assert not await habits_repo.was_habit_reminder_sent(chk_id, "2026-10-31", "09:00")
+    await habits_repo.record_habit_reminder_sent(chk_id, 101, "2026-10-31", "09:00")
+    assert await habits_repo.was_habit_reminder_sent(chk_id, "2026-10-31", "09:00")
+
+    # Snooze tests
+    await habits_repo.add_habit_snooze(chk_id, 101, snooze_seconds=-5)  # already due
+    due_snoozes = await habits_repo.get_due_snoozes(int(time.time()))
+    assert len(due_snoozes) >= 1
+    snooze_obj = [s for s in due_snoozes if s["habit_id"] == chk_id][0]
+    assert snooze_obj["name"] == "Витамин D и Омега-3"
+    await habits_repo.delete_snooze(snooze_obj["snooze_id"])
+    due_after = await habits_repo.get_due_snoozes(int(time.time()))
+    assert not any(s["habit_id"] == chk_id for s in due_after)
+
+    # Edit checklist habit
+    upd_chk = await habits_repo.update_habit(chk_id, 101, target_repeats=3, reminder_times="08:00,14:00,20:00")
+    assert upd_chk["target_repeats"] == 3
+    assert upd_chk["reminder_times"] == "08:00,14:00,20:00"
+
+    chk_card = format_habit_edit_card(upd_chk)
+    assert "3 раз(а) в день" in chk_card
+    assert "08:00,14:00,20:00" in chk_card
+    print("✅ 14. Checklist / Discrete habits (repeats, reminders, snoozes, check-in) verified.")
+
     # Cleanup
     if os.path.exists(TEST_DB):
         os.remove(TEST_DB)

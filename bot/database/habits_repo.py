@@ -1,5 +1,6 @@
 """Repository for habit definitions, daily progress logs, and streak tracking."""
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from bot.database.db import get_db
@@ -9,16 +10,22 @@ from bot.database import users_repo
 async def create_habit(
     user_id: int,
     name: str,
-    target_minutes: int,
+    target_minutes: int = 30,
     active_days: str = "1,2,3,4,5,6,7",
+    habit_type: str = "duration",
+    target_repeats: int = 1,
+    reminder_times: Optional[str] = None,
 ) -> int:
     """Create a new habit and return its ID."""
     async with get_db() as db:
         query = """
-        INSERT INTO habits (user_id, name, target_minutes, active_days, streak_days, is_frozen_today)
-        VALUES (?, ?, ?, ?, 0, 0);
+        INSERT INTO habits (user_id, name, target_minutes, active_days, streak_days, is_frozen_today, habit_type, target_repeats, reminder_times)
+        VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?);
         """
-        cursor = await db.execute(query, (user_id, name.strip(), target_minutes, active_days))
+        cursor = await db.execute(
+            query,
+            (user_id, name.strip(), max(0, target_minutes), active_days, habit_type, max(1, target_repeats), reminder_times),
+        )
         await db.commit()
         return cursor.lastrowid or 0
 
@@ -38,8 +45,11 @@ async def update_habit(
     name: Optional[str] = None,
     target_minutes: Optional[int] = None,
     active_days: Optional[str] = None,
+    habit_type: Optional[str] = None,
+    target_repeats: Optional[int] = None,
+    reminder_times: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Update habit fields (name, target_minutes, active_days) verifying user ownership."""
+    """Update habit fields verifying user ownership."""
     fields = []
     params = []
     if name is not None:
@@ -47,10 +57,19 @@ async def update_habit(
         params.append(name.strip())
     if target_minutes is not None:
         fields.append("target_minutes = ?")
-        params.append(max(1, target_minutes))
+        params.append(max(0, target_minutes))
     if active_days is not None:
         fields.append("active_days = ?")
         params.append(active_days.strip())
+    if habit_type is not None:
+        fields.append("habit_type = ?")
+        params.append(habit_type.strip())
+    if target_repeats is not None:
+        fields.append("target_repeats = ?")
+        params.append(max(1, target_repeats))
+    if reminder_times is not None:
+        fields.append("reminder_times = ?")
+        params.append(reminder_times.strip() if reminder_times.strip() else None)
 
     if not fields:
         return await get_habit_by_id(habit_id)
@@ -88,7 +107,6 @@ async def get_today_habits_with_status(
     joined with the habit_logs for the specified local date (YYYY-MM-DD).
     """
     async with get_db() as db:
-        # Check if weekday is in active_days (format: "1,2,3,4,5,6,7")
         query = """
         SELECT
             h.id,
@@ -98,8 +116,12 @@ async def get_today_habits_with_status(
             h.active_days,
             h.streak_days,
             h.is_frozen_today,
+            h.habit_type,
+            h.target_repeats,
+            h.reminder_times,
             h.created_at,
             COALESCE(l.spent_minutes, 0) AS spent_minutes,
+            COALESCE(l.completed_repeats, 0) AS completed_repeats,
             COALESCE(l.is_completed, 0) AS is_completed,
             l.notes
         FROM habits h
@@ -128,8 +150,12 @@ async def get_all_habits_with_today_status(
             h.active_days,
             h.streak_days,
             h.is_frozen_today,
+            h.habit_type,
+            h.target_repeats,
+            h.reminder_times,
             h.created_at,
             COALESCE(l.spent_minutes, 0) AS spent_minutes,
+            COALESCE(l.completed_repeats, 0) AS completed_repeats,
             COALESCE(l.is_completed, 0) AS is_completed,
             l.notes
         FROM habits h
@@ -219,26 +245,123 @@ async def upsert_habit_log(
             return add_minutes, (add_minutes >= target_minutes)
 
 
+async def increment_habit_repeat(
+    habit_id: int,
+    user_id: int,
+    logged_date: str,
+) -> Tuple[int, int, bool]:
+    """
+    Increment completed_repeats by 1 for a checklist habit.
+    Returns (completed_repeats, target_repeats, is_completed).
+    """
+    habit = await get_habit_by_id(habit_id)
+    if not habit:
+        return 0, 1, False
+    target_repeats = habit.get("target_repeats", 1) or 1
+
+    async with get_db() as db:
+        query = """
+        INSERT INTO habit_logs (habit_id, user_id, logged_date, spent_minutes, completed_repeats, is_completed)
+        VALUES (?, ?, ?, 0, 1, CASE WHEN 1 >= ? THEN 1 ELSE 0 END)
+        ON CONFLICT(habit_id, logged_date) DO UPDATE SET
+            completed_repeats = habit_logs.completed_repeats + 1,
+            is_completed = CASE
+                WHEN habit_logs.completed_repeats + 1 >= ? THEN 1
+                ELSE habit_logs.is_completed
+            END
+        RETURNING completed_repeats, is_completed;
+        """
+        async with db.execute(query, (habit_id, user_id, logged_date, target_repeats, target_repeats)) as cursor:
+            row = await cursor.fetchone()
+            await db.commit()
+            if row:
+                return row["completed_repeats"], target_repeats, bool(row["is_completed"])
+            return 1, target_repeats, (1 >= target_repeats)
+
+
 async def set_habit_completed_manual(
     habit_id: int,
     user_id: int,
     logged_date: str,
-    target_minutes: int,
+    target_minutes: int = 0,
 ) -> None:
     """Manually complete a habit (e.g. from evening check-in)."""
+    habit = await get_habit_by_id(habit_id)
+    target_reps = habit.get("target_repeats", 1) if habit else 1
+    tgt_mins = habit.get("target_minutes", target_minutes) if habit else target_minutes
+
     async with get_db() as db:
         query = """
-        INSERT INTO habit_logs (habit_id, user_id, logged_date, spent_minutes, is_completed)
-        VALUES (?, ?, ?, ?, 1)
+        INSERT INTO habit_logs (habit_id, user_id, logged_date, spent_minutes, completed_repeats, is_completed)
+        VALUES (?, ?, ?, ?, ?, 1)
         ON CONFLICT(habit_id, logged_date) DO UPDATE SET
             spent_minutes = CASE
                 WHEN habit_logs.spent_minutes < excluded.spent_minutes THEN excluded.spent_minutes
                 ELSE habit_logs.spent_minutes
             END,
+            completed_repeats = CASE
+                WHEN habit_logs.completed_repeats < excluded.completed_repeats THEN excluded.completed_repeats
+                ELSE habit_logs.completed_repeats
+            END,
             is_completed = 1;
         """
-        await db.execute(query, (habit_id, user_id, logged_date, target_minutes))
+        await db.execute(query, (habit_id, user_id, logged_date, tgt_mins, target_reps))
         await db.commit()
+
+
+async def add_habit_snooze(habit_id: int, user_id: int, snooze_seconds: int = 900) -> None:
+    """Snooze a habit reminder by given seconds (default 15 minutes)."""
+    now_ts = int(time.time())
+    snooze_until = now_ts + snooze_seconds
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO habit_snoozes (habit_id, user_id, snooze_until) VALUES (?, ?, ?);",
+            (habit_id, user_id, snooze_until),
+        )
+        await db.commit()
+
+
+async def get_due_snoozes(now_ts: int) -> List[Dict[str, Any]]:
+    """Fetch snoozed habit reminders that have expired and are due."""
+    async with get_db() as db:
+        query = """
+        SELECT s.id AS snooze_id, s.habit_id, s.user_id, h.name, h.habit_type, h.target_repeats
+        FROM habit_snoozes s
+        JOIN habits h ON h.id = s.habit_id
+        WHERE s.snooze_until <= ?;
+        """
+        async with db.execute(query, (now_ts,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def delete_snooze(snooze_id: int) -> None:
+    """Delete a processed snooze record."""
+    async with get_db() as db:
+        await db.execute("DELETE FROM habit_snoozes WHERE id = ?;", (snooze_id,))
+        await db.commit()
+
+
+async def record_habit_reminder_sent(habit_id: int, user_id: int, reminded_date: str, reminder_time: str) -> None:
+    """Log that a reminder was sent for a habit at a specific time today."""
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO habit_reminders_log (habit_id, user_id, reminded_date, reminder_time)
+            VALUES (?, ?, ?, ?);
+            """,
+            (habit_id, user_id, reminded_date, reminder_time),
+        )
+        await db.commit()
+
+
+async def was_habit_reminder_sent(habit_id: int, reminded_date: str, reminder_time: str) -> bool:
+    """Check if a reminder has already been sent today at this time."""
+    async with get_db() as db:
+        query = "SELECT id FROM habit_reminders_log WHERE habit_id = ? AND reminded_date = ? AND reminder_time = ?;"
+        async with db.execute(query, (habit_id, reminded_date, reminder_time)) as cursor:
+            row = await cursor.fetchone()
+            return bool(row)
 
 
 async def update_habit_log_notes(habit_id: int, logged_date: str, note: str) -> None:
@@ -286,7 +409,10 @@ async def get_weekly_stats(
             h.target_minutes,
             h.streak_days,
             h.active_days,
+            h.habit_type,
+            h.target_repeats,
             COALESCE(SUM(l.spent_minutes), 0) AS total_spent,
+            COALESCE(SUM(l.completed_repeats), 0) AS total_repeats,
             COALESCE(SUM(CASE WHEN l.is_completed = 1 THEN 1 ELSE 0 END), 0) AS completed_days
         FROM habits h
         LEFT JOIN habit_logs l ON l.habit_id = h.id AND l.logged_date BETWEEN ? AND ?
@@ -316,7 +442,7 @@ async def get_export_data(
     async with get_db() as db:
         for habit in habits:
             query = """
-            SELECT logged_date, spent_minutes, is_completed, notes
+            SELECT logged_date, spent_minutes, completed_repeats, is_completed, notes
             FROM habit_logs
             WHERE habit_id = ? AND logged_date BETWEEN ? AND ?
             ORDER BY logged_date ASC;
