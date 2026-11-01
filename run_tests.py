@@ -29,6 +29,14 @@ from bot.services.nutrition_parser import (
     format_weight_dashboard,
     parse_meal_input,
 )
+from bot.keyboards.inline import (
+    get_food_portions_keyboard,
+    get_food_search_results_keyboard,
+    get_meal_category_inline_keyboard,
+    get_nutrition_dashboard_keyboard,
+    get_nutrition_goals_menu_keyboard,
+)
+from bot.handlers.checkin import format_checkin_text
 
 TEST_DB = "standalone_test.db"
 
@@ -462,7 +470,6 @@ async def run_all_checks():
     assert rep_meal["calories"] == 120
 
     # Keyboards check
-    from bot.keyboards.inline import get_food_portions_keyboard, get_food_search_results_keyboard, get_meal_category_inline_keyboard
     kb_freq = get_meal_category_inline_keyboard(frequent_meals=freq_breakfast)
     assert any("Кофе с молоком" in btn.text for row in kb_freq.inline_keyboard for btn in row)
 
@@ -470,6 +477,105 @@ async def run_all_checks():
     assert len(kb_port.inline_keyboard) >= 3
 
     print("✅ 15. Food Catalog (search, portion macros) and 1-Click Frequent Meals verified.")
+
+    # 16. Optional Water & Macro (BJU) Tracking Settings
+    # Default settings: both enabled
+    goals_101 = await nutrition_repo.get_nutrition_goals(101)
+    assert goals_101["track_bju"] == 1
+    assert goals_101["track_water"] == 1
+
+    # Toggle BJU to off
+    new_bju = await nutrition_repo.toggle_track_bju(101)
+    assert new_bju is False
+    goals_101 = await nutrition_repo.get_nutrition_goals(101)
+    assert goals_101["track_bju"] == 0
+
+    # Toggle Water to off
+    new_water = await nutrition_repo.toggle_track_water(101)
+    assert new_water is False
+    goals_101 = await nutrition_repo.get_nutrition_goals(101)
+    assert goals_101["track_water"] == 0
+
+    # Keyboards check with water disabled
+    kb_no_water = get_nutrition_dashboard_keyboard(has_meals=True, has_water=True, track_water=False)
+    all_buttons_no_water = [btn.text for row in kb_no_water.inline_keyboard for btn in row]
+    assert not any("250 мл" in t for t in all_buttons_no_water)
+    assert not any("➕ Вода" in t for t in all_buttons_no_water)
+    assert not any("Отменить воду" in t for t in all_buttons_no_water)
+    assert any("➕ Добавить еду" in t for t in all_buttons_no_water)
+
+    # Keyboards check with water enabled
+    kb_with_water = get_nutrition_dashboard_keyboard(has_meals=True, has_water=True, track_water=True)
+    all_buttons_with_water = [btn.text for row in kb_with_water.inline_keyboard for btn in row]
+    assert any("250 мл" in t for t in all_buttons_with_water)
+    assert any("Отменить воду" in t for t in all_buttons_with_water)
+
+    # Goals menu keyboard
+    kb_goals_menu = get_nutrition_goals_menu_keyboard(track_bju=False, track_water=False)
+    btn_texts = [btn.text for row in kb_goals_menu.inline_keyboard for btn in row]
+    assert any("БЖУ: ❌ ВЫКЛ" in t for t in btn_texts)
+    assert any("воды: ❌ ВЫКЛ" in t for t in btn_texts)
+
+    # Dashboard formatting with BJU & water disabled
+    meals_101 = await nutrition_repo.get_meals_for_date(101, "2026-11-01")
+    summary_101 = await nutrition_repo.get_daily_summary(101, "2026-11-01")
+    dash_hidden = format_nutrition_dashboard(
+        goals=goals_101,
+        summary=summary_101,
+        meals=meals_101,
+        local_date="2026-11-01",
+        water_current=500,
+        water_target=2000,
+    )
+    assert "БЖУ" not in dash_hidden
+    assert "Белки" not in dash_hidden
+    assert "💧 **Вода:**" not in dash_hidden
+    assert "1.5Ж" not in dash_hidden  # No macros in meal lines
+
+    # Check-in formatting with BJU & water disabled
+    checkin_hidden = format_checkin_text(
+        habits=[],
+        local_date="2026-11-01",
+        nutrition_summary=summary_101,
+        nutrition_goals=goals_101,
+        water_ml=500,
+        water_target=2000,
+    )
+    assert "Б /" not in checkin_hidden
+    assert "Вода за сегодня" not in checkin_hidden
+    assert "Питание за сегодня:" in checkin_hidden
+
+    # Re-enable BJU & Water
+    await nutrition_repo.toggle_track_bju(101)
+    await nutrition_repo.toggle_track_water(101)
+    goals_101_on = await nutrition_repo.get_nutrition_goals(101)
+    assert goals_101_on["track_bju"] == 1
+    assert goals_101_on["track_water"] == 1
+
+    dash_visible = format_nutrition_dashboard(
+        goals=goals_101_on,
+        summary=summary_101,
+        meals=meals_101,
+        local_date="2026-11-01",
+        water_current=500,
+        water_target=2000,
+    )
+    assert ("Белки" in dash_visible or "БЖУ" in dash_visible)
+    assert "1.5Ж" in dash_visible
+    assert "💧 **Вода:**" in dash_visible
+
+    checkin_visible = format_checkin_text(
+        habits=[],
+        local_date="2026-11-01",
+        nutrition_summary=summary_101,
+        nutrition_goals=goals_101_on,
+        water_ml=500,
+        water_target=2000,
+    )
+    assert "Б /" in checkin_visible
+    assert "Вода за сегодня" in checkin_visible
+
+    print("✅ 16. Optional Water & Macro (BJU) Tracking Settings verified.")
 
     # Cleanup
     if os.path.exists(TEST_DB):

@@ -54,18 +54,24 @@ def format_checkin_text(
                 remaining = max(0, target - spent)
                 lines.append(f"⏳ «{h['name']}» — {spent}/{target} мин (Осталось: {remaining} мин)")
 
+    track_bju = bool((nutrition_goals or {}).get("track_bju", 1))
+    track_water = bool((nutrition_goals or {}).get("track_water", 1))
+
     if nutrition_summary and nutrition_summary.get("meal_count", 0) > 0:
         cals = nutrition_summary.get("total_calories", 0)
         target = (nutrition_goals or {}).get("target_calories", 2000)
         diff = target - cals
         diff_str = f"осталось {diff} ккал" if diff >= 0 else f"+{abs(diff)} ккал сверх нормы"
-        p = nutrition_summary.get("total_protein", 0)
-        f = nutrition_summary.get("total_fat", 0)
-        c = nutrition_summary.get("total_carbs", 0)
-        macros_part = f" ({p}Б / {f}Ж / {c}У)" if (p > 0 or f > 0 or c > 0) else ""
+        macros_part = ""
+        if track_bju:
+            p = nutrition_summary.get("total_protein", 0)
+            f = nutrition_summary.get("total_fat", 0)
+            c = nutrition_summary.get("total_carbs", 0)
+            if p > 0 or f > 0 or c > 0:
+                macros_part = f" ({p}Б / {f}Ж / {c}У)"
         lines.append(f"\n🥗 **Питание за сегодня:** {cals}/{target} ккал ({diff_str}){macros_part}")
 
-    if water_ml > 0:
+    if track_water and water_ml > 0:
         lines.append(f"💧 **Вода за сегодня:** {water_ml}/{water_target} мл")
 
     incomplete = [h for h in habits if not h.get("is_completed") and not h.get("is_frozen_today")]

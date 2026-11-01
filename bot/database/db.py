@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS nutrition_goals (
     target_protein REAL NOT NULL DEFAULT 0.0,
     target_fat REAL NOT NULL DEFAULT 0.0,
     target_carbs REAL NOT NULL DEFAULT 0.0,
+    track_bju INTEGER NOT NULL DEFAULT 1,
+    track_water INTEGER NOT NULL DEFAULT 1,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
@@ -208,6 +210,13 @@ async def init_db(db_path: Optional[str] = None) -> None:
             cols = [r["name"] for r in await cursor.fetchall()]
             if "completed_repeats" not in cols:
                 await db.execute("ALTER TABLE habit_logs ADD COLUMN completed_repeats INTEGER NOT NULL DEFAULT 0;")
+
+        async with db.execute("PRAGMA table_info(nutrition_goals);") as cursor:
+            cols = [r["name"] for r in await cursor.fetchall()]
+            if "track_bju" not in cols:
+                await db.execute("ALTER TABLE nutrition_goals ADD COLUMN track_bju INTEGER NOT NULL DEFAULT 1;")
+            if "track_water" not in cols:
+                await db.execute("ALTER TABLE nutrition_goals ADD COLUMN track_water INTEGER NOT NULL DEFAULT 1;")
 
         await db.commit()
 

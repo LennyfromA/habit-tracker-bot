@@ -11,7 +11,12 @@ async def get_nutrition_goals(user_id: int) -> Dict[str, Any]:
         async with db.execute(query, (user_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
-                return dict(row)
+                res = dict(row)
+                if "track_bju" not in res or res["track_bju"] is None:
+                    res["track_bju"] = 1
+                if "track_water" not in res or res["track_water"] is None:
+                    res["track_water"] = 1
+                return res
 
     return {
         "user_id": user_id,
@@ -19,7 +24,61 @@ async def get_nutrition_goals(user_id: int) -> Dict[str, Any]:
         "target_protein": 0.0,
         "target_fat": 0.0,
         "target_carbs": 0.0,
+        "track_bju": 1,
+        "track_water": 1,
     }
+
+
+async def toggle_track_bju(user_id: int) -> bool:
+    """Toggle track_bju setting for user, returning the new state (True = tracking enabled)."""
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO nutrition_goals (user_id, target_calories, track_bju, track_water)
+            VALUES (?, 2000, 1, 1)
+            ON CONFLICT(user_id) DO NOTHING;
+            """,
+            (user_id,),
+        )
+        await db.execute(
+            """
+            UPDATE nutrition_goals
+            SET track_bju = CASE WHEN track_bju = 1 THEN 0 ELSE 1 END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?;
+            """,
+            (user_id,),
+        )
+        await db.commit()
+        async with db.execute("SELECT track_bju FROM nutrition_goals WHERE user_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return bool(row["track_bju"]) if row else True
+
+
+async def toggle_track_water(user_id: int) -> bool:
+    """Toggle track_water setting for user, returning the new state (True = tracking enabled)."""
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO nutrition_goals (user_id, target_calories, track_bju, track_water)
+            VALUES (?, 2000, 1, 1)
+            ON CONFLICT(user_id) DO NOTHING;
+            """,
+            (user_id,),
+        )
+        await db.execute(
+            """
+            UPDATE nutrition_goals
+            SET track_water = CASE WHEN track_water = 1 THEN 0 ELSE 1 END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?;
+            """,
+            (user_id,),
+        )
+        await db.commit()
+        async with db.execute("SELECT track_water FROM nutrition_goals WHERE user_id = ?;", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return bool(row["track_water"]) if row else True
 
 
 async def set_nutrition_goals(

@@ -119,7 +119,7 @@ def parse_meal_input(raw: str, default_meal_type: str = "snack") -> Optional[Dic
     return None
 
 
-def format_meal_item(meal: Dict[str, Any]) -> str:
+def format_meal_item(meal: Dict[str, Any], show_macros: bool = True) -> str:
     """Format single meal row for display."""
     type_label = MEAL_TYPE_MAP.get(meal.get("meal_type", "snack"), "🍏 Перекус")
     title = meal.get("title", "Еда")
@@ -135,7 +135,7 @@ def format_meal_item(meal: Dict[str, Any]) -> str:
         time_part = f"`{created_at[11:16]}` "
 
     macros_text = ""
-    if p > 0 or f > 0 or c > 0:
+    if show_macros and (p > 0 or f > 0 or c > 0):
         macros_text = f" ({round(p, 1)}Б / {round(f, 1)}Ж / {round(c, 1)}У)"
 
     return f"{time_part}[{type_label}] **{title}** — {cals} ккал{macros_text}"
@@ -155,6 +155,8 @@ def format_nutrition_dashboard(
     target_p = goals.get("target_protein", 0.0)
     target_f = goals.get("target_fat", 0.0)
     target_c = goals.get("target_carbs", 0.0)
+    track_bju = bool(goals.get("track_bju", 1))
+    track_water = bool(goals.get("track_water", 1))
 
     total_cals = summary.get("total_calories", 0)
     total_p = summary.get("total_protein", 0.0)
@@ -174,22 +176,23 @@ def format_nutrition_dashboard(
         f"🔥 **Калории:** `{cals_bar}` **{total_cals}** / {target_cals} ккал ({cals_diff_text})",
     ]
 
-    # Show macros
-    if target_p > 0 or target_f > 0 or target_c > 0:
-        p_bar = render_bar(total_p, target_p, length=6) if target_p > 0 else "[-]"
-        f_bar = render_bar(total_f, target_f, length=6) if target_f > 0 else "[-]"
-        c_bar = render_bar(total_c, target_c, length=6) if target_c > 0 else "[-]"
-        lines.append(f"🥩 **Белки:**    `{p_bar}` {total_p}/{target_p} г")
-        lines.append(f"🥑 **Жиры:**     `{f_bar}` {total_f}/{target_f} г")
-        lines.append(f"🍞 **Углеводы:** `{c_bar}` {total_c}/{target_c} г")
-    else:
-        # Optional macros without strict goals
-        lines.append(
-            f"📊 **БЖУ за день:** 🥩 {total_p}г белков | 🥑 {total_f}г жиров | 🍞 {total_c}г углеводов"
-        )
+    # Show macros if tracking is enabled
+    if track_bju:
+        if target_p > 0 or target_f > 0 or target_c > 0:
+            p_bar = render_bar(total_p, target_p, length=6) if target_p > 0 else "[-]"
+            f_bar = render_bar(total_f, target_f, length=6) if target_f > 0 else "[-]"
+            c_bar = render_bar(total_c, target_c, length=6) if target_c > 0 else "[-]"
+            lines.append(f"🥩 **Белки:**    `{p_bar}` {total_p}/{target_p} г")
+            lines.append(f"🥑 **Жиры:**     `{f_bar}` {total_f}/{target_f} г")
+            lines.append(f"🍞 **Углеводы:** `{c_bar}` {total_c}/{target_c} г")
+        else:
+            # Optional macros without strict goals
+            lines.append(
+                f"📊 **БЖУ за день:** 🥩 {total_p}г белков | 🥑 {total_f}г жиров | 🍞 {total_c}г углеводов"
+            )
 
-    # Show water
-    if water_target > 0:
+    # Show water if tracking is enabled
+    if track_water and water_target > 0:
         w_bar = render_bar(water_current, water_target)
         w_diff = water_target - water_current
         w_diff_text = f"Осталось: {w_diff} мл" if w_diff > 0 else "Норма выполнена! 🎉"
@@ -205,12 +208,13 @@ def format_nutrition_dashboard(
         lines.append("🍽 За сегодня записей еды пока нет.")
         lines.append("Нажмите **«➕ Добавить перекус / еду»** или просто напишите, например:")
         lines.append("• `Кофе с молоком 120`")
-        lines.append("• `Творог 180 20/4/3`")
+        if track_bju:
+            lines.append("• `Творог 180 20/4/3`")
         lines.append("• `+250`")
     else:
         lines.append(f"📋 **Приемы пищи за сегодня ({len(meals)}):**")
         for m in meals:
-            lines.append(f"• {format_meal_item(m)}")
+            lines.append(f"• {format_meal_item(m, show_macros=track_bju)}")
 
     return "\n".join(lines)
 

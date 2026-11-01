@@ -16,6 +16,7 @@ from bot.keyboards.inline import (
     get_meal_input_inline_keyboard,
     get_meals_delete_keyboard,
     get_nutrition_dashboard_keyboard,
+    get_nutrition_goals_menu_keyboard,
     get_weight_dashboard_keyboard,
     get_weight_reminder_time_keyboard,
 )
@@ -41,6 +42,7 @@ async def build_nutrition_view(user_id: int, local_date: str) -> Tuple[str, Any]
     water_tgt = await water_repo.get_water_target(user_id)
     weight_rec = await weight_repo.get_weight_for_date(user_id, local_date)
     today_w = weight_rec["weight"] if weight_rec else None
+    track_water = bool(goals.get("track_water", 1))
 
     text = format_nutrition_dashboard(
         goals=goals,
@@ -51,7 +53,11 @@ async def build_nutrition_view(user_id: int, local_date: str) -> Tuple[str, Any]
         water_target=water_tgt,
         today_weight=today_w,
     )
-    kb = get_nutrition_dashboard_keyboard(has_meals=bool(meals), has_water=(water_cur > 0))
+    kb = get_nutrition_dashboard_keyboard(
+        has_meals=bool(meals),
+        has_water=(water_cur > 0),
+        track_water=track_water,
+    )
     return text, kb
 
 
@@ -117,8 +123,10 @@ async def cmd_nutrition_dashboard(
             )
             dash_text, kb = await build_nutrition_view(user_id, local_date)
             type_name = MEAL_TYPE_MAP.get(parsed["meal_type"], "🍏 Перекус")
+            goals = await nutrition_repo.get_nutrition_goals(user_id)
+            track_bju = bool(goals.get("track_bju", 1))
             macros_note = ""
-            if parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0:
+            if track_bju and (parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0):
                 macros_note = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
 
             await message.answer(
@@ -166,8 +174,14 @@ async def cmd_quick_snack(message: Message, local_date: str) -> None:
     )
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+    macros_note = ""
+    if track_bju and (parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0):
+        macros_note = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
+
     await message.answer(
-        f"✅ Перекус добавлен: **{parsed['title']}** (+{parsed['calories']} ккал)\n\n" + dash_text,
+        f"✅ Перекус добавлен: **{parsed['title']}** (+{parsed['calories']} ккал){macros_note}\n\n" + dash_text,
         reply_markup=kb,
     )
 
@@ -185,16 +199,17 @@ async def cb_nutr_refresh(callback: CallbackQuery, local_date: str, state: FSMCo
     await callback.answer("Обновлено")
 
 
-def format_product_card(product: Dict[str, Any]) -> str:
+def format_product_card(product: Dict[str, Any], show_macros: bool = True) -> str:
     """Format product summary card with 100g macros."""
     name = product["name"]
     cals = round(float(product["calories_100g"]))
     p = float(product.get("protein_100g", 0.0))
     f = float(product.get("fat_100g", 0.0))
     c = float(product.get("carbs_100g", 0.0))
+    macros_part = f" ({p}Б / {f}Ж / {c}У)" if show_macros else ""
     return (
         f"🔍 **{name}**\n\n"
-        f"📊 **На 100 грамм:** `{cals} ккал` ({p}Б / {f}Ж / {c}У)\n\n"
+        f"📊 **На 100 грамм:** `{cals} ккал`{macros_part}\n\n"
         f"Выберите размер порции или укажите свой вес:"
     )
 
@@ -320,8 +335,10 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
             meal_type=parsed["meal_type"],
         )
         type_name = MEAL_TYPE_MAP.get(parsed["meal_type"], "🍏 Перекус")
+        goals = await nutrition_repo.get_nutrition_goals(user_id)
+        track_bju = bool(goals.get("track_bju", 1))
         macros_info = ""
-        if parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0:
+        if track_bju and (parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0):
             macros_info = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
 
         dash_text, kb = await build_nutrition_view(user_id, local_date)
@@ -334,6 +351,9 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
         return
 
     # 2. If no calories provided, search local food database
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+
     matches = await food_repo.search_food(raw_text, limit=5)
     if not matches:
         await message.answer(
@@ -349,7 +369,7 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
     if len(matches) == 1:
         # Exactly 1 match found -> show portions selector immediately
         prod = matches[0]
-        card_text = format_product_card(prod)
+        card_text = format_product_card(prod, show_macros=track_bju)
         await message.answer(
             card_text,
             reply_markup=get_food_portions_keyboard(prod),
@@ -369,13 +389,16 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
 @router.callback_query(F.data.startswith("food_pick:"))
 async def cb_food_pick(callback: CallbackQuery) -> None:
     """User picked one product from multiple search results."""
+    user_id = callback.from_user.id
     food_id = int(callback.data.split(":")[1])
     product = await food_repo.get_food_by_id(food_id)
     if not product:
         await callback.answer("Продукт не найден.", show_alert=True)
         return
 
-    card_text = format_product_card(product)
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+    card_text = format_product_card(product, show_macros=track_bju)
     try:
         await callback.message.edit_text(
             card_text,
@@ -383,6 +406,8 @@ async def cb_food_pick(callback: CallbackQuery) -> None:
             parse_mode="Markdown",
         )
     except Exception:
+        pass
+    await callback.answer()
         pass
     await callback.answer()
 
@@ -432,10 +457,14 @@ async def cb_food_portion(
     )
 
     type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+    macros_part = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)" if track_bju else ""
+
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await callback.message.edit_text(
-        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал "
-        f"({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)!\n\n" + dash_text,
+        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал"
+        f"{macros_part}!\n\n" + dash_text,
         reply_markup=kb,
         parse_mode="Markdown",
     )
@@ -504,10 +533,14 @@ async def process_custom_product_grams(
     )
 
     type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+    macros_part = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)" if track_bju else ""
+
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await message.answer(
-        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал "
-        f"({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)!\n\n" + dash_text,
+        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал"
+        f"{macros_part}!\n\n" + dash_text,
         reply_markup=kb,
         parse_mode="Markdown",
     )
@@ -553,6 +586,98 @@ async def cb_nutr_del_item(callback: CallbackQuery, local_date: str) -> None:
 
 @router.callback_query(F.data == "nutr_set_goal")
 async def cb_nutr_set_goal(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open nutrition goals and tracking settings menu."""
+    await state.clear()
+    user_id = callback.from_user.id
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    cals = goals.get("target_calories", 2000)
+    p = goals.get("target_protein", 0.0)
+    f = goals.get("target_fat", 0.0)
+    c = goals.get("target_carbs", 0.0)
+    track_bju = bool(goals.get("track_bju", 1))
+    track_water = bool(goals.get("track_water", 1))
+
+    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
+
+    text = (
+        f"🎯 **Настройки целей и отслеживания**\n\n"
+        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
+        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
+        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
+        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
+        f"чтобы не перегружать экран лишней информацией."
+    )
+    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "nutr_toggle_bju")
+async def cb_nutr_toggle_bju(callback: CallbackQuery) -> None:
+    """Toggle BJU tracking on or off."""
+    user_id = callback.from_user.id
+    new_state = await nutrition_repo.toggle_track_bju(user_id)
+    state_str = "включен ✅" if new_state else "выключен ❌"
+    await callback.answer(f"Учет БЖУ {state_str}")
+
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    cals = goals.get("target_calories", 2000)
+    p = goals.get("target_protein", 0.0)
+    f = goals.get("target_fat", 0.0)
+    c = goals.get("target_carbs", 0.0)
+    track_bju = bool(goals.get("track_bju", 1))
+    track_water = bool(goals.get("track_water", 1))
+
+    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
+    text = (
+        f"🎯 **Настройки целей и отслеживания**\n\n"
+        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
+        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
+        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
+        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
+        f"чтобы не перегружать экран лишней информацией."
+    )
+    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "nutr_toggle_water")
+async def cb_nutr_toggle_water(callback: CallbackQuery) -> None:
+    """Toggle water tracking on or off."""
+    user_id = callback.from_user.id
+    new_state = await nutrition_repo.toggle_track_water(user_id)
+    state_str = "включен ✅" if new_state else "выключен ❌"
+    await callback.answer(f"Трекер воды {state_str}")
+
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    cals = goals.get("target_calories", 2000)
+    p = goals.get("target_protein", 0.0)
+    f = goals.get("target_fat", 0.0)
+    c = goals.get("target_carbs", 0.0)
+    track_bju = bool(goals.get("track_bju", 1))
+    track_water = bool(goals.get("track_water", 1))
+
+    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
+    text = (
+        f"🎯 **Настройки целей и отслеживания**\n\n"
+        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
+        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
+        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
+        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
+        f"чтобы не перегружать экран лишней информацией."
+    )
+    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "nutr_change_cals")
+async def cb_nutr_change_cals(callback: CallbackQuery, state: FSMContext) -> None:
     """Start setting daily calorie target."""
     user_id = callback.from_user.id
     goals = await nutrition_repo.get_nutrition_goals(user_id)
@@ -569,7 +694,7 @@ async def cb_nutr_set_goal(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(NutritionStates.waiting_for_calories_goal)
-async def process_calorie_goal(message: Message, state: FSMContext) -> None:
+async def process_calorie_goal(message: Message, state: FSMContext, local_date: str) -> None:
     """Validate calorie goal and optionally ask for BJU."""
     text = (message.text or "").strip()
     match = re.search(r"\d+", text)
@@ -580,6 +705,27 @@ async def process_calorie_goal(message: Message, state: FSMContext) -> None:
     cals = int(match.group(0))
     if cals < 500 or cals > 10000:
         await message.answer("⚠️ Пожалуйста, введите реалистичную норму калорий (от 500 до 10000 ккал).")
+        return
+
+    user_id = message.from_user.id
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    track_bju = bool(goals.get("track_bju", 1))
+
+    if not track_bju:
+        # BJU tracking disabled - save calorie goal immediately
+        await state.clear()
+        await nutrition_repo.set_nutrition_goals(
+            user_id=user_id,
+            calories=cals,
+            protein=0.0,
+            fat=0.0,
+            carbs=0.0,
+        )
+        dash_text, kb = await build_nutrition_view(user_id, local_date)
+        await message.answer(
+            f"🎉 **Ваша норма калорий успешно сохранена: {cals} ккал!**\n\n" + dash_text,
+            reply_markup=kb,
+        )
         return
 
     await state.update_data(target_calories=cals)

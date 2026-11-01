@@ -374,32 +374,59 @@ def get_checkin_dashboard_keyboard(habits: List[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_nutrition_dashboard_keyboard(has_meals: bool = False, has_water: bool = False) -> InlineKeyboardMarkup:
+def get_nutrition_dashboard_keyboard(
+    has_meals: bool = False,
+    has_water: bool = False,
+    track_water: bool = True,
+) -> InlineKeyboardMarkup:
     """Build dashboard keyboard for nutrition & hydration menu."""
-    keyboard = [
-        [
+    keyboard = []
+    if track_water:
+        keyboard.append([
             InlineKeyboardButton(text="💧 +250 мл", callback_data="water_add:250"),
             InlineKeyboardButton(text="🍶 +500 мл", callback_data="water_add:500"),
             InlineKeyboardButton(text="➕ Вода", callback_data="water_custom"),
-        ],
-        [
-            InlineKeyboardButton(text="➕ Добавить еду", callback_data="nutr_add"),
-            InlineKeyboardButton(text="⚖️ Мой вес", callback_data="weight_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="🎯 Моя норма", callback_data="nutr_set_goal"),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="nutr_refresh"),
-        ],
-    ]
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(text="➕ Добавить еду", callback_data="nutr_add"),
+        InlineKeyboardButton(text="⚖️ Мой вес", callback_data="weight_menu"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton(text="🎯 Моя норма", callback_data="nutr_set_goal"),
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="nutr_refresh"),
+    ])
+
     actions_row = []
     if has_meals:
         actions_row.append(InlineKeyboardButton(text="🗑 Удалить еду", callback_data="nutr_delete_menu"))
-    if has_water:
+    if track_water and has_water:
         actions_row.append(InlineKeyboardButton(text="↩️ Отменить воду", callback_data="water_undo"))
 
     if actions_row:
         keyboard.append(actions_row)
 
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_nutrition_goals_menu_keyboard(track_bju: bool, track_water: bool) -> InlineKeyboardMarkup:
+    """Build interactive settings keyboard to customize nutrition and water tracking."""
+    bju_status = "✅ ВКЛ" if track_bju else "❌ ВЫКЛ"
+    water_status = "✅ ВКЛ" if track_water else "❌ ВЫКЛ"
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🔥 Изменить норму калорий", callback_data="nutr_change_cals"),
+        ],
+        [
+            InlineKeyboardButton(text=f"📊 Учет БЖУ: {bju_status}", callback_data="nutr_toggle_bju"),
+        ],
+        [
+            InlineKeyboardButton(text=f"💧 Трекер воды: {water_status}", callback_data="nutr_toggle_water"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад к питанию", callback_data="nutr_refresh"),
+        ],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
