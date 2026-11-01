@@ -421,6 +421,56 @@ async def run_all_checks():
     assert "08:00,14:00,20:00" in chk_card
     print("✅ 14. Checklist / Discrete habits (repeats, reminders, snoozes, check-in) verified.")
 
+    # 15. Food Catalog, Portions & Frequent Meals (Stages 1 & 2)
+    from bot.database import food_repo
+    # Search catalog
+    banana_matches = await food_repo.search_food("банан")
+    assert len(banana_matches) >= 1
+    banana = banana_matches[0]
+    assert "Банан" in banana["name"]
+    assert len(banana["portions"]) >= 2
+    assert banana["calories_100g"] == 89.0
+
+    # Calculate portion macros
+    port_macros = food_repo.calculate_portion_macros(banana, 120)  # 120g banana
+    assert port_macros["calories"] == 107
+    assert port_macros["grams"] == 120
+
+    # Search meat
+    chicken_matches = await food_repo.search_food("курица")
+    assert len(chicken_matches) >= 1
+    assert "Куриное" in chicken_matches[0]["name"]
+
+    # Frequent meals test
+    # Log 3 meals for user 101
+    await nutrition_repo.add_meal(101, "2026-11-01", "Кофе с молоком", 120, 2.0, 1.5, 4.0, "breakfast")
+    await nutrition_repo.add_meal(101, "2026-11-01", "Овсянка", 250, 8.0, 4.0, 42.0, "breakfast")
+    await nutrition_repo.add_meal(101, "2026-11-01", "Кофе с молоком", 120, 2.0, 1.5, 4.0, "breakfast")
+
+    freq_breakfast = await nutrition_repo.get_frequent_meals(101, meal_type="breakfast", limit=4)
+    assert len(freq_breakfast) >= 2
+    assert freq_breakfast[0]["title"] == "Кофе с молоком"
+    assert freq_breakfast[0]["frequency"] >= 2
+
+    # Repeat frequent meal
+    top_meal = freq_breakfast[0]
+    rep_meal = await nutrition_repo.add_meal(
+        101, "2026-11-01", top_meal["title"], top_meal["calories"],
+        top_meal["protein"], top_meal["fat"], top_meal["carbs"], top_meal["meal_type"]
+    )
+    assert rep_meal["title"] == "Кофе с молоком"
+    assert rep_meal["calories"] == 120
+
+    # Keyboards check
+    from bot.keyboards.inline import get_food_portions_keyboard, get_food_search_results_keyboard, get_meal_category_inline_keyboard
+    kb_freq = get_meal_category_inline_keyboard(frequent_meals=freq_breakfast)
+    assert any("Кофе с молоком" in btn.text for row in kb_freq.inline_keyboard for btn in row)
+
+    kb_port = get_food_portions_keyboard(banana)
+    assert len(kb_port.inline_keyboard) >= 3
+
+    print("✅ 15. Food Catalog (search, portion macros) and 1-Click Frequent Meals verified.")
+
     # Cleanup
     if os.path.exists(TEST_DB):
         os.remove(TEST_DB)

@@ -1,6 +1,6 @@
 """Inline keyboards for interactive actions: timers, habits, check-in, timezone."""
 
-from typing import Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 DAY_LABELS = {
@@ -446,22 +446,97 @@ def get_weight_reminder_time_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_meal_category_inline_keyboard() -> InlineKeyboardMarkup:
-    """Select meal category when adding food."""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="🍳 Завтрак", callback_data="nutr_cat:breakfast"),
-            InlineKeyboardButton(text="🍲 Обед", callback_data="nutr_cat:lunch"),
-        ],
-        [
-            InlineKeyboardButton(text="🍝 Ужин", callback_data="nutr_cat:dinner"),
-            InlineKeyboardButton(text="🍏 Перекус", callback_data="nutr_cat:snack"),
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Назад в меню питания", callback_data="nutr_refresh"),
-        ],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+def get_meal_category_inline_keyboard(frequent_meals: Optional[List[dict]] = None) -> InlineKeyboardMarkup:
+    """Select meal category when adding food, optionally displaying top frequent meals."""
+    rows: List[List[InlineKeyboardButton]] = []
+
+    if frequent_meals:
+        for m in frequent_meals[:4]:
+            cals = m.get("calories", 0)
+            title = m.get("title", "Еда")
+            clean_title = title if len(title) <= 22 else f"{title[:20]}…"
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"⚡ {clean_title} ({cals} ккал)",
+                    callback_data=f"meal_repeat:{m['id']}",
+                )
+            ])
+
+    rows.append([
+        InlineKeyboardButton(text="🍳 Завтрак", callback_data="nutr_cat:breakfast"),
+        InlineKeyboardButton(text="🍲 Обед", callback_data="nutr_cat:lunch"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🍝 Ужин", callback_data="nutr_cat:dinner"),
+        InlineKeyboardButton(text="🍏 Перекус", callback_data="nutr_cat:snack"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Назад в меню питания", callback_data="nutr_refresh"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_meal_input_inline_keyboard(frequent_meals: Optional[List[dict]] = None) -> InlineKeyboardMarkup:
+    """Keyboard when a category is selected, showing category's frequent meals and back button."""
+    rows: List[List[InlineKeyboardButton]] = []
+
+    if frequent_meals:
+        for m in frequent_meals[:4]:
+            cals = m.get("calories", 0)
+            title = m.get("title", "Еда")
+            clean_title = title if len(title) <= 22 else f"{title[:20]}…"
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"⚡ {clean_title} ({cals} ккал)",
+                    callback_data=f"meal_repeat:{m['id']}",
+                )
+            ])
+
+    rows.append([
+        InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="nutr_add"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_food_search_results_keyboard(products: List[dict]) -> InlineKeyboardMarkup:
+    """Buttons when search query matches multiple products from catalog."""
+    rows: List[List[InlineKeyboardButton]] = []
+    for p in products:
+        cals = round(float(p["calories_100g"]))
+        name = p["name"]
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{name} ({cals} ккал/100г)",
+                callback_data=f"food_pick:{p['id']}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="nutr_add")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_food_portions_keyboard(product: dict) -> InlineKeyboardMarkup:
+    """Portion selection buttons for a chosen catalog product."""
+    rows: List[List[InlineKeyboardButton]] = []
+    portions = product.get("portions", [])
+
+    for idx, port in enumerate(portions):
+        g = float(port.get("grams", 100))
+        cals = round(g * float(product["calories_100g"]) / 100.0)
+        port_name = port.get("name", f"{int(g)}г")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{port_name} · {cals} ккал",
+                callback_data=f"food_portion:{product['id']}:{idx}",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="✍️ Ввести свой вес (граммы)", callback_data=f"food_custom_g:{product['id']}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="nutr_add"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_meals_delete_keyboard(meals: List[dict]) -> InlineKeyboardMarkup:

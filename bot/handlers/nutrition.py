@@ -8,9 +8,12 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.database import nutrition_repo, users_repo, water_repo, weight_repo
+from bot.database import food_repo, nutrition_repo, users_repo, water_repo, weight_repo
 from bot.keyboards.inline import (
+    get_food_portions_keyboard,
+    get_food_search_results_keyboard,
     get_meal_category_inline_keyboard,
+    get_meal_input_inline_keyboard,
     get_meals_delete_keyboard,
     get_nutrition_dashboard_keyboard,
     get_weight_dashboard_keyboard,
@@ -182,16 +185,43 @@ async def cb_nutr_refresh(callback: CallbackQuery, local_date: str, state: FSMCo
     await callback.answer("Обновлено")
 
 
+def format_product_card(product: Dict[str, Any]) -> str:
+    """Format product summary card with 100g macros."""
+    name = product["name"]
+    cals = round(float(product["calories_100g"]))
+    p = float(product.get("protein_100g", 0.0))
+    f = float(product.get("fat_100g", 0.0))
+    c = float(product.get("carbs_100g", 0.0))
+    return (
+        f"🔍 **{name}**\n\n"
+        f"📊 **На 100 грамм:** `{cals} ккал` ({p}Б / {f}Ж / {c}У)\n\n"
+        f"Выберите размер порции или укажите свой вес:"
+    )
+
+
 @router.callback_query(F.data == "nutr_add")
 async def cb_nutr_add(callback: CallbackQuery, state: FSMContext) -> None:
-    """Prompt user to choose meal category or enter directly."""
-    await callback.message.edit_text(
-        "🍽 **Выберите категорию приема пищи:**\n\n"
-        "Либо отправьте перекус текстом одной строкой прямо сейчас.",
-        reply_markup=get_meal_category_inline_keyboard(),
-    )
+    """Prompt user to choose meal category or enter directly, showing frequent meals."""
+    user_id = callback.from_user.id
+    frequent = await nutrition_repo.get_frequent_meals(user_id, limit=4)
     await state.set_state(NutritionStates.waiting_for_meal_text)
     await state.update_data(meal_type="snack")
+
+    prompt_text = "🍽 **Добавление приема пищи**\n\n"
+    if frequent:
+        prompt_text += "⚡ **Ваши частые блюда (быстрый ввод в 1 клик):**\n"
+        prompt_text += "Либо выберите категорию или напишите название продукта/калории:"
+    else:
+        prompt_text += (
+            "Выберите категорию или отправьте название продукта (например: `банан`, `гречка`, `курица`):\n\n"
+            "Либо отправьте сразу с калориями: `Кофе с молоком 120`."
+        )
+
+    await callback.message.edit_text(
+        prompt_text,
+        reply_markup=get_meal_category_inline_keyboard(frequent_meals=frequent),
+        parse_mode="Markdown",
+    )
     await callback.answer()
 
 
@@ -199,66 +229,287 @@ async def cb_nutr_add(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_nutr_cat(callback: CallbackQuery, state: FSMContext) -> None:
     """Handle meal category selection."""
     meal_type = callback.data.split(":")[1]
+    user_id = callback.from_user.id
     await state.set_state(NutritionStates.waiting_for_meal_text)
     await state.update_data(meal_type=meal_type)
 
     type_name = MEAL_TYPE_MAP.get(meal_type, "Прием пищи")
+    frequent = await nutrition_repo.get_frequent_meals(user_id, meal_type=meal_type, limit=4)
+
+    prompt_lines = [
+        f"✍️ Категория: **{type_name}**\n",
+    ]
+    if frequent:
+        prompt_lines.append("⚡ **Ваши частые блюда в этой категории:**\n")
+    prompt_lines.append(
+        "Напишите название продукта (например: `банан`, `овсянка`, `яйцо`),\n"
+        "или укажите свои калории (например: `Творог 180 20/4/3` или `250`).\n\n"
+        "_(Отправьте /cancel для отмены)_"
+    )
+
     await callback.message.edit_text(
-        f"✍️ Вы выбрали: **{type_name}**\n\n"
-        f"Напишите, что вы съели, и калории (БЖУ по желанию):\n\n"
-        f"**Примеры:**\n"
-        f"• `Кофе с молоком 120`\n"
-        f"• `Творог 180 20/4/3` _(ккал, белки/жиры/углеводы)_\n"
-        f"• `Омлет 320 22б 18ж 3у`\n"
-        f"• `250` _(если хотите просто калории)_\n\n"
-        f"_(Отправьте /cancel для отмены)_"
+        "\n".join(prompt_lines),
+        reply_markup=get_meal_input_inline_keyboard(frequent_meals=frequent),
+        parse_mode="Markdown",
     )
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("meal_repeat:"))
+async def cb_meal_repeat(
+    callback: CallbackQuery,
+    local_date: str,
+    state: FSMContext,
+) -> None:
+    """Instantly log a frequent meal in 1 click."""
+    meal_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    meal = await nutrition_repo.get_meal_by_id(meal_id, user_id)
+    if not meal:
+        await callback.answer("Блюдо не найдено.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    chosen_type = data.get("meal_type") or meal.get("meal_type") or "snack"
+    await state.clear()
+
+    added = await nutrition_repo.add_meal(
+        user_id=user_id,
+        logged_date=local_date,
+        title=meal["title"],
+        calories=meal["calories"],
+        protein=meal["protein"],
+        fat=meal["fat"],
+        carbs=meal["carbs"],
+        meal_type=chosen_type,
+    )
+
+    dash_text, kb = await build_nutrition_view(user_id, local_date)
+    type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
+    await callback.message.edit_text(
+        f"✅ Добавлено в 1 клик: [{type_name}] **{added['title']}** (+{added['calories']} ккал)!\n\n" + dash_text,
+        reply_markup=kb,
+        parse_mode="Markdown",
+    )
+    await callback.answer(f"«{added['title']}» (+{added['calories']} ккал) записано!")
+
+
 @router.message(NutritionStates.waiting_for_meal_text)
 async def process_meal_input(message: Message, state: FSMContext, local_date: str) -> None:
-    """Process user food entry in FSM."""
+    """Process user food entry in FSM: manual calories or product search."""
     user_id = message.from_user.id
     raw_text = (message.text or "").strip()
+    if raw_text.startswith("/"):
+        return
 
     data = await state.get_data()
     chosen_type = data.get("meal_type", "snack")
 
+    # 1. Try manual entry parser first (if user explicitly provided numbers)
     parsed = parse_meal_input(raw_text, default_meal_type=chosen_type)
-    if not parsed:
+    if parsed:
+        await state.clear()
+        await nutrition_repo.add_meal(
+            user_id=user_id,
+            logged_date=local_date,
+            title=parsed["title"],
+            calories=parsed["calories"],
+            protein=parsed["protein"],
+            fat=parsed["fat"],
+            carbs=parsed["carbs"],
+            meal_type=parsed["meal_type"],
+        )
+        type_name = MEAL_TYPE_MAP.get(parsed["meal_type"], "🍏 Перекус")
+        macros_info = ""
+        if parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0:
+            macros_info = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
+
+        dash_text, kb = await build_nutrition_view(user_id, local_date)
         await message.answer(
-            "⚠️ Не удалось распознать калории. Пожалуйста, укажите название и калории.\n\n"
-            "Примеры:\n"
-            "• `Кофе с молоком 120`\n"
-            "• `Творог 180 20/4/3`\n"
-            "• `350`\n\n"
-            "Или напишите /cancel для отмены."
+            f"✅ Добавлено: [{type_name}] **{parsed['title']}** — {parsed['calories']} ккал{macros_info}!\n\n"
+            + dash_text,
+            reply_markup=kb,
+            parse_mode="Markdown",
         )
         return
 
+    # 2. If no calories provided, search local food database
+    matches = await food_repo.search_food(raw_text, limit=5)
+    if not matches:
+        await message.answer(
+            f"🔍 По запросу «**{raw_text}**» продуктов в базе не найдено.\n\n"
+            f"Вы можете записать блюдо вручную с калориями, например:\n"
+            f"• `{raw_text} 250`\n"
+            f"• `{raw_text} 180 20/4/3` _(ккал Б/Ж/У)_\n\n"
+            f"_(Или отправьте /cancel для отмены)_",
+            parse_mode="Markdown",
+        )
+        return
+
+    if len(matches) == 1:
+        # Exactly 1 match found -> show portions selector immediately
+        prod = matches[0]
+        card_text = format_product_card(prod)
+        await message.answer(
+            card_text,
+            reply_markup=get_food_portions_keyboard(prod),
+            parse_mode="Markdown",
+        )
+        return
+
+    # Multiple matches found -> show list to choose from
+    await message.answer(
+        f"🔍 Найдено несколько вариантов по запросу «**{raw_text}**»:\n"
+        f"Выберите подходящий продукт:",
+        reply_markup=get_food_search_results_keyboard(matches),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("food_pick:"))
+async def cb_food_pick(callback: CallbackQuery) -> None:
+    """User picked one product from multiple search results."""
+    food_id = int(callback.data.split(":")[1])
+    product = await food_repo.get_food_by_id(food_id)
+    if not product:
+        await callback.answer("Продукт не найден.", show_alert=True)
+        return
+
+    card_text = format_product_card(product)
+    try:
+        await callback.message.edit_text(
+            card_text,
+            reply_markup=get_food_portions_keyboard(product),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("food_portion:"))
+async def cb_food_portion(
+    callback: CallbackQuery,
+    local_date: str,
+    state: FSMContext,
+) -> None:
+    """User selected a preset portion of a catalog food."""
+    parts = callback.data.split(":")
+    food_id = int(parts[1])
+    portion_idx = int(parts[2])
+
+    product = await food_repo.get_food_by_id(food_id)
+    if not product:
+        await callback.answer("Продукт не найден.", show_alert=True)
+        return
+
+    portions = product.get("portions", [])
+    if portion_idx < 0 or portion_idx >= len(portions):
+        await callback.answer("Порция не найдена.", show_alert=True)
+        return
+
+    selected_portion = portions[portion_idx]
+    grams = float(selected_portion.get("grams", 100))
+    macros = food_repo.calculate_portion_macros(product, grams)
+
+    data = await state.get_data()
+    chosen_type = data.get("meal_type", "snack")
     await state.clear()
+
+    portion_name = selected_portion.get("name", f"{int(grams)}г")
+    title = f"{product['name']} ({portion_name})"
+
+    user_id = callback.from_user.id
     await nutrition_repo.add_meal(
         user_id=user_id,
         logged_date=local_date,
-        title=parsed["title"],
-        calories=parsed["calories"],
-        protein=parsed["protein"],
-        fat=parsed["fat"],
-        carbs=parsed["carbs"],
-        meal_type=parsed["meal_type"],
+        title=title,
+        calories=macros["calories"],
+        protein=macros["protein"],
+        fat=macros["fat"],
+        carbs=macros["carbs"],
+        meal_type=chosen_type,
     )
 
-    type_name = MEAL_TYPE_MAP.get(parsed["meal_type"], "🍏 Перекус")
-    macros_info = ""
-    if parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0:
-        macros_info = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
+    type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
+    dash_text, kb = await build_nutrition_view(user_id, local_date)
+    await callback.message.edit_text(
+        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал "
+        f"({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)!\n\n" + dash_text,
+        reply_markup=kb,
+        parse_mode="Markdown",
+    )
+    await callback.answer(f"«{product['name']}» (+{macros['calories']} ккал) добавлено!")
 
+
+@router.callback_query(F.data.startswith("food_custom_g:"))
+async def cb_food_custom_g(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user to type custom grams for selected product."""
+    food_id = int(callback.data.split(":")[1])
+    product = await food_repo.get_food_by_id(food_id)
+    if not product:
+        await callback.answer("Продукт не найден.", show_alert=True)
+        return
+
+    await state.set_state(NutritionStates.waiting_for_product_grams)
+    await state.update_data(chosen_food_id=food_id)
+    await callback.message.edit_text(
+        f"✍️ **Введите вес в граммах для «{product['name']}»:**\n\n"
+        f"_(Например: `140` или `250`, отправьте /cancel для отмены)_",
+        parse_mode="Markdown",
+    )
+    await callback.answer()
+
+
+@router.message(NutritionStates.waiting_for_product_grams)
+async def process_custom_product_grams(
+    message: Message,
+    state: FSMContext,
+    local_date: str,
+) -> None:
+    """Handle custom grams text entry."""
+    raw_text = (message.text or "").strip()
+    if raw_text.startswith("/"):
+        return
+
+    match = re.search(r"\d+", raw_text)
+    if not match or int(match.group(0)) <= 0 or int(match.group(0)) > 5000:
+        await message.answer("⚠️ Пожалуйста, введите положительное число грамм от 1 до 5000 (или /cancel):")
+        return
+
+    grams = float(match.group(0))
+    data = await state.get_data()
+    food_id = data.get("chosen_food_id")
+    chosen_type = data.get("meal_type", "snack")
+    await state.clear()
+
+    product = await food_repo.get_food_by_id(food_id)
+    if not product:
+        await message.answer("⚠️ Продукт не найден.", reply_markup=get_main_reply_keyboard())
+        return
+
+    macros = food_repo.calculate_portion_macros(product, grams)
+    user_id = message.from_user.id
+    title = f"{product['name']} ({int(grams)}г)"
+
+    await nutrition_repo.add_meal(
+        user_id=user_id,
+        logged_date=local_date,
+        title=title,
+        calories=macros["calories"],
+        protein=macros["protein"],
+        fat=macros["fat"],
+        carbs=macros["carbs"],
+        meal_type=chosen_type,
+    )
+
+    type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await message.answer(
-        f"✅ Добавлено: [{type_name}] **{parsed['title']}** — {parsed['calories']} ккал{macros_info}!\n\n"
-        + dash_text,
+        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал "
+        f"({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)!\n\n" + dash_text,
         reply_markup=kb,
+        parse_mode="Markdown",
     )
 
 

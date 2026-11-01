@@ -141,12 +141,26 @@ CREATE TABLE IF NOT EXISTS weight_logs (
     UNIQUE(user_id, logged_date)
 );
 
+CREATE TABLE IF NOT EXISTS food_database (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    aliases TEXT NOT NULL,
+    calories_100g REAL NOT NULL,
+    protein_100g REAL NOT NULL DEFAULT 0.0,
+    fat_100g REAL NOT NULL DEFAULT 0.0,
+    carbs_100g REAL NOT NULL DEFAULT 0.0,
+    portions_json TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_user_date ON habit_logs(user_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_habit_date ON habit_logs(habit_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_water_logs_user_date ON water_logs(user_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_weight_logs_user_date ON weight_logs(user_id, logged_date);
+CREATE INDEX IF NOT EXISTS idx_food_name ON food_database(name);
+CREATE INDEX IF NOT EXISTS idx_food_category ON food_database(category);
 """
 
 
@@ -196,4 +210,9 @@ async def init_db(db_path: Optional[str] = None) -> None:
                 await db.execute("ALTER TABLE habit_logs ADD COLUMN completed_repeats INTEGER NOT NULL DEFAULT 0;")
 
         await db.commit()
+
+    # Seed food catalog if table is empty
+    from bot.database.food_repo import seed_food_catalog_if_empty
+    await seed_food_catalog_if_empty()
+
     logger.info("Database initialized successfully.")

@@ -77,6 +77,85 @@ async def add_meal(
             return dict(row) if row else {}
 
 
+async def get_frequent_meals(
+    user_id: int,
+    meal_type: Optional[str] = None,
+    limit: int = 4,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve user's most frequently logged meals, optionally filtered by meal_type.
+    Returns list of dicts with title, calories, protein, fat, carbs, meal_type, and latest meal_id.
+    """
+    async with get_db() as db:
+        if meal_type:
+            query = """
+            SELECT
+                MAX(id) AS id,
+                title,
+                calories,
+                protein,
+                fat,
+                carbs,
+                meal_type,
+                COUNT(id) AS frequency
+            FROM meal_logs
+            WHERE user_id = ? AND meal_type = ?
+            GROUP BY title, calories, protein, fat, carbs
+            ORDER BY frequency DESC, id DESC
+            LIMIT ?;
+            """
+            params = (user_id, meal_type, limit)
+        else:
+            query = """
+            SELECT
+                MAX(id) AS id,
+                title,
+                calories,
+                protein,
+                fat,
+                carbs,
+                meal_type,
+                COUNT(id) AS frequency
+            FROM meal_logs
+            WHERE user_id = ?
+            GROUP BY title, calories, protein, fat, carbs
+            ORDER BY frequency DESC, id DESC
+            LIMIT ?;
+            """
+            params = (user_id, limit)
+
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            results = [dict(r) for r in rows]
+
+            # If fewer than limit results for specific meal_type, supplement with global frequent meals
+            if meal_type and len(results) < limit:
+                existing_titles = {r["title"] for r in results}
+                global_query = """
+                SELECT
+                    MAX(id) AS id,
+                    title,
+                    calories,
+                    protein,
+                    fat,
+                    carbs,
+                    meal_type,
+                    COUNT(id) AS frequency
+                FROM meal_logs
+                WHERE user_id = ?
+                GROUP BY title, calories, protein, fat, carbs
+                ORDER BY frequency DESC, id DESC
+                LIMIT ?;
+                """
+                async with db.execute(global_query, (user_id, limit)) as cursor2:
+                    global_rows = await cursor2.fetchall()
+                    for gr in global_rows:
+                        if gr["title"] not in existing_titles and len(results) < limit:
+                            results.append(dict(gr))
+
+            return results
+
+
 async def get_meals_for_date(user_id: int, logged_date: str) -> List[Dict[str, Any]]:
     """Fetch all meals logged by user for a given local date."""
     async with get_db() as db:
