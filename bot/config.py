@@ -23,7 +23,15 @@ class Settings(BaseSettings):
     # Telegram Mini App / HTML Widget configuration
     WIDGET_BASE_URL: str = Field(
         default="",
-        description="Public HTTPS base URL for the widget, e.g. https://bot.example.com",
+        description="Public HTTPS base URL for the widget, e.g. https://bot.example.com or 'auto'",
+    )
+    AUTO_TUNNEL: bool = Field(
+        default=False,
+        description="Automatically download and run Cloudflare tunnel directly on the server",
+    )
+    CLOUDFLARE_TUNNEL_TOKEN: str = Field(
+        default="",
+        description="Optional Cloudflare Zero Trust permanent tunnel token",
     )
     WEB_HOST: str = Field(
         default="0.0.0.0",

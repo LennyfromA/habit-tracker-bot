@@ -72,6 +72,23 @@ async def main() -> None:
     logger.info("APScheduler initialized and running.")
 
     # 6. Start Embedded Web Server for Mini App Widget
+    web_runner = await start_web_server(bot, settings.WEB_HOST, settings.WEB_PORT)
+
+    # 6.1 Check if Auto-Tunnel should be started (runs directly on server without PC)
+    should_auto_tunnel = (
+        settings.AUTO_TUNNEL
+        or settings.WIDGET_BASE_URL.strip().lower() == "auto"
+        or bool(settings.CLOUDFLARE_TUNNEL_TOKEN)
+    )
+    if should_auto_tunnel:
+        from bot.services.tunnel import start_auto_tunnel
+        tunnel_url = await start_auto_tunnel(
+            local_port=settings.WEB_PORT,
+            token=settings.CLOUDFLARE_TUNNEL_TOKEN or None,
+        )
+        if tunnel_url and not settings.CLOUDFLARE_TUNNEL_TOKEN:
+            settings.WIDGET_BASE_URL = tunnel_url
+
     if is_widget_enabled():
         logger.info("🚀 Telegram Mini App widget enabled: %s", settings.WIDGET_BASE_URL)
     else:
@@ -80,14 +97,18 @@ async def main() -> None:
             "Bot will run in graceful fallback mode using standard Telegram messages."
         )
 
-    web_runner = await start_web_server(bot, settings.WEB_HOST, settings.WEB_PORT)
-
     # 7. Start Polling with clean shutdown
     try:
         logger.info("Bot started polling.")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        logger.info("Shutting down bot, web server, and scheduler...")
+        logger.info("Shutting down bot, web server, scheduler, and tunnel...")
+        if should_auto_tunnel:
+            try:
+                from bot.services.tunnel import stop_auto_tunnel
+                await stop_auto_tunnel()
+            except Exception as e:
+                logger.debug("Failed stopping tunnel: %s", e)
         await stop_web_server(web_runner)
         scheduler.shutdown(wait=False)
         await bot.session.close()
