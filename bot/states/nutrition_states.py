@@ -8,6 +8,7 @@ class NutritionStates(StatesGroup):
 
     waiting_for_meal_text = State()
     waiting_for_product_grams = State()
+    waiting_for_custom_grams = waiting_for_product_grams  # Alias for backward compatibility
     waiting_for_calories_goal = State()
     waiting_for_bju_goal = State()
     waiting_for_water_amount = State()

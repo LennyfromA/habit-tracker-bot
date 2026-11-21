@@ -3,6 +3,13 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class SettingsStates(StatesGroup):
+    """States for updating settings (timezone and checkin time) for existing users."""
+
+    waiting_for_timezone = State()
+    waiting_for_checkin_time = State()
+
+
 class OnboardingStates(StatesGroup):
     """States for user registration and timezone configuration."""
 

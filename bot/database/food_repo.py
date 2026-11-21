@@ -8,9 +8,9 @@ from bot.database.db import get_db
 from bot.database.food_catalog_data import FOOD_CATALOG
 
 
-async def seed_food_catalog_if_empty() -> None:
+async def seed_food_catalog_if_empty(db_path: Optional[str] = None) -> None:
     """Populate food_database table from catalog data if currently empty."""
-    async with get_db() as db:
+    async with get_db(db_path) as db:
         async with db.execute("SELECT COUNT(id) AS cnt FROM food_database;") as cursor:
             row = await cursor.fetchone()
             if row and row["cnt"] > 0:
@@ -37,67 +37,75 @@ async def seed_food_catalog_if_empty() -> None:
         await db.commit()
 
 
-async def search_food(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+async def search_food(query: str, limit: int = 5, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Search food products by matching against name or aliases.
-    Matches full phrase or individual words.
+    Fully case-insensitive for Cyrillic and Latin using Python .casefold().
+    Ranks exact matches, prefix matches, substring matches, and multi-word fallbacks.
     """
-    clean_q = query.strip().lower()
+    clean_q = query.strip().casefold()
     if not clean_q or len(clean_q) < 2:
         return []
 
-    words = [re.escape(w) for w in clean_q.split() if len(w) >= 2]
-    if not words:
-        words = [re.escape(clean_q)]
+    q_words = [w for w in clean_q.split() if len(w) >= 1]
 
-    async with get_db() as db:
-        # Match either exact substring or all words
-        pattern = f"%{clean_q}%"
-        sql = """
-        SELECT * FROM food_database
-        WHERE LOWER(name) LIKE ? OR LOWER(aliases) LIKE ?
-        ORDER BY
-            CASE
-                WHEN LOWER(name) = ? THEN 1
-                WHEN LOWER(name) LIKE (? || '%') THEN 2
-                ELSE 3
-            END,
-            id ASC
-        LIMIT ?;
-        """
-        async with db.execute(sql, (pattern, pattern, clean_q, clean_q, limit)) as cursor:
+    async with get_db(db_path) as db:
+        sql = "SELECT * FROM food_database ORDER BY id ASC;"
+        async with db.execute(sql) as cursor:
             rows = await cursor.fetchall()
-            results = []
-            for r in rows:
-                item = dict(r)
-                try:
-                    item["portions"] = json.loads(item["portions_json"])
-                except Exception:
-                    item["portions"] = []
-                results.append(item)
 
-            if results:
-                return results
+    scored_items = []
+    for r in rows:
+        item = dict(r)
+        try:
+            item["portions"] = json.loads(item["portions_json"])
+        except Exception:
+            item["portions"] = []
 
-            # Fallback: search by primary word if multi-word query didn't match
-            if len(words) > 1:
-                first_word_pattern = f"%{words[0]}%"
-                async with db.execute(sql, (first_word_pattern, first_word_pattern, words[0], words[0], limit)) as cursor2:
-                    rows2 = await cursor2.fetchall()
-                    for r in rows2:
-                        item = dict(r)
-                        try:
-                            item["portions"] = json.loads(item["portions_json"])
-                        except Exception:
-                            item["portions"] = []
-                        results.append(item)
+        name_cf = item["name"].casefold()
+        aliases_raw = item.get("aliases", "") or ""
+        aliases_cf = aliases_raw.casefold()
+        aliases_list = [a.strip() for a in aliases_cf.split(",") if a.strip()]
 
-            return results
+        # Ranking tiers:
+        # 1: Exact match with name or any alias
+        if clean_q == name_cf or clean_q in aliases_list:
+            rank = 1
+            word_score = len(q_words)
+        # 2: Name or alias starts with query
+        elif name_cf.startswith(clean_q) or any(a.startswith(clean_q) for a in aliases_list):
+            rank = 2
+            word_score = len(q_words)
+        # 3: Query is a substring of product name
+        elif clean_q in name_cf:
+            rank = 3
+            word_score = len(q_words)
+        # 4: Query is a substring of aliases
+        elif clean_q in aliases_cf:
+            rank = 4
+            word_score = len(q_words)
+        # 5: All words from query appear in name or aliases
+        elif q_words and all(w in name_cf or w in aliases_cf for w in q_words):
+            rank = 5
+            word_score = len(q_words)
+        else:
+            # 6: Fallback - count matching words
+            matching = [w for w in q_words if (len(w) >= 2 and (w in name_cf or w in aliases_cf))]
+            if matching and len(matching) >= max(1, len(q_words) // 2):
+                rank = 6
+                word_score = len(matching)
+            else:
+                continue
+
+        scored_items.append((rank, -word_score, len(item["name"]), item["id"], item))
+
+    scored_items.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    return [x[4] for x in scored_items[:limit]]
 
 
-async def get_food_by_id(food_id: int) -> Optional[Dict[str, Any]]:
+async def get_food_by_id(food_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Retrieve food product by primary key ID."""
-    async with get_db() as db:
+    async with get_db(db_path) as db:
         query = "SELECT * FROM food_database WHERE id = ?;"
         async with db.execute(query, (food_id,)) as cursor:
             row = await cursor.fetchone()

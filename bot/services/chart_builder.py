@@ -18,7 +18,7 @@ def build_weekly_stats_chart(
     Generate a 2-subplot dark-themed weekly progress chart in-memory.
 
     Subplot 1: Bar chart of daily focus minutes for the last 7 days.
-    Subplot 2: Horizontal bar chart of focus minutes per habit.
+    Subplot 2: Horizontal bar chart of focus minutes / repeats per habit.
     """
     end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
     dates_7 = [(end_dt - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
@@ -28,8 +28,19 @@ def build_weekly_stats_chart(
     day_minutes = [daily_stats.get(d, 0) for d in dates_7]
 
     # Prepare data for Subplot 2
-    habit_names = [h["name"] for h in habits_stats] if habits_stats else ["Нет привычек"]
-    habit_minutes = [h.get("total_spent", 0) for h in habits_stats] if habits_stats else [0]
+    habit_names = []
+    habit_values = []
+    if habits_stats:
+        for h in habits_stats:
+            if h.get("habit_type") == "checklist":
+                habit_names.append(f"{h['name']} (повт.)")
+                habit_values.append(h.get("total_repeats", 0))
+            else:
+                habit_names.append(h["name"])
+                habit_values.append(h.get("total_spent", 0))
+    else:
+        habit_names = ["Нет привычек"]
+        habit_values = [0]
 
     # Matplotlib styling (Dark theme)
     plt.style.use("dark_background")
@@ -66,21 +77,23 @@ def build_weekly_stats_chart(
     colors = ["#A6E3A1", "#F38BA8", "#FAB387", "#F9E2AF", "#CBA6F7", "#94E2D5", "#89DCEB"]
     bar_colors = [colors[i % len(colors)] for i in range(len(habit_names))]
 
-    bars2 = ax2.barh(y_pos, habit_minutes, color=bar_colors, height=0.55, edgecolor="#CDD6F4", linewidth=0.8)
+    bars2 = ax2.barh(y_pos, habit_values, color=bar_colors, height=0.55, edgecolor="#CDD6F4", linewidth=0.8)
     ax2.set_yticks(list(y_pos))
     ax2.set_yticklabels(habit_names, fontsize=10, color="#CDD6F4")
-    ax2.set_title("Время по привычкам за неделю (мин)", fontsize=13, fontweight="bold", color="#CDD6F4", pad=12)
-    ax2.set_xlabel("Суммарно минут", fontsize=11, color="#BAC2DE")
+    ax2.set_title("Активность по привычкам за неделю", fontsize=13, fontweight="bold", color="#CDD6F4", pad=12)
+    ax2.set_xlabel("Минуты / Количество повторений", fontsize=11, color="#BAC2DE")
     ax2.tick_params(colors="#A6ADC8", labelsize=10)
     ax2.grid(axis="x", linestyle="--", alpha=0.2, color="#6C7086")
     ax2.invert_yaxis()  # top-down habit order
 
     # Add labels on horizontal bars
-    for bar in bars2:
+    for idx, bar in enumerate(bars2):
         width = bar.get_width()
         if width > 0:
+            is_chk = habits_stats and idx < len(habits_stats) and habits_stats[idx].get("habit_type") == "checklist"
+            unit_suffix = " раз" if is_chk else " м"
             ax2.annotate(
-                f"{int(width)} м",
+                f"{int(width)}{unit_suffix}",
                 xy=(width, bar.get_y() + bar.get_height() / 2),
                 xytext=(5, 0),
                 textcoords="offset points",

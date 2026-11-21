@@ -17,7 +17,9 @@ async def create_or_update_user(
         INSERT INTO users (user_id, username, utc_offset, checkin_time)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
-            username = COALESCE(excluded.username, users.username)
+            username = COALESCE(excluded.username, users.username),
+            utc_offset = excluded.utc_offset,
+            checkin_time = excluded.checkin_time
         RETURNING *;
         """
         async with db.execute(query, (user_id, username, utc_offset, checkin_time)) as cursor:

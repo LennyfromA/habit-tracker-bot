@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Трекер Привычек и Здоровья</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/widget/assets/styles.css">
+  <script src="/widget/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app" class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <h1 id="header-title" class="header-title">Привычки</h1>
+        <span id="header-date" class="header-date">Сегодня</span>
+      </div>
+      <div class="header-right">
+        <span id="sync-indicator" class="sync-dot" title="Синхронизировано с чатом"></span>
+      </div>
+    </header>
+
+    <!-- 5-Tab Segmented Navigation Bar -->
+    <nav class="nav-bar">
+      <button type="button" class="nav-btn active" data-tab="habits" id="tab-habits">
+        <span class="nav-icon">📋</span>
+        <span class="nav-label">Привычки</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="timer" id="tab-timer">
+        <span class="nav-icon">⏱</span>
+        <span class="nav-label">Фокус</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="health" id="tab-health">
+        <span class="nav-icon">🍏</span>
+        <span class="nav-label">Здоровье</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="stats" id="tab-stats">
+        <span class="nav-icon">📊</span>
+        <span class="nav-label">Итоги</span>
+      </button>
+      <button type="button" class="nav-btn" data-tab="settings" id="tab-settings">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-label">Настройки</span>
+      </button>
+    </nav>
+
+    <!-- Main Dynamic View Container -->
+    <main id="app-view" class="app-view">
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <p>Загрузка данных...</p>
+      </div>
+    </main>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+</body>
+</html>

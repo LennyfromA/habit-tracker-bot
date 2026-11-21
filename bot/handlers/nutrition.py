@@ -1,12 +1,15 @@
 """Handler for nutrition tracking: meals, snacks, water intake, morning weight tracking, and reminders."""
 
+import html
+import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.database import food_repo, nutrition_repo, users_repo, water_repo, weight_repo
 from bot.keyboards.inline import (
@@ -24,12 +27,14 @@ from bot.keyboards.reply import get_main_reply_keyboard
 from bot.services.nutrition_parser import (
     MEAL_TYPE_MAP,
     format_nutrition_dashboard,
+    format_product_card,
     format_weight_dashboard,
     parse_meal_input,
-    render_bar,
 )
+from bot.services.widget_launcher import is_widget_enabled, send_widget_card
 from bot.states.nutrition_states import NutritionStates
 
+logger = logging.getLogger(__name__)
 router = Router(name="nutrition_router")
 
 
@@ -44,6 +49,9 @@ async def build_nutrition_view(user_id: int, local_date: str) -> Tuple[str, Any]
     today_w = weight_rec["weight"] if weight_rec else None
     track_water = bool(goals.get("track_water", 1))
 
+    user = await users_repo.get_user(user_id)
+    utc_offset = user.get("utc_offset", 3) if user else 3
+
     text = format_nutrition_dashboard(
         goals=goals,
         summary=summary,
@@ -52,12 +60,37 @@ async def build_nutrition_view(user_id: int, local_date: str) -> Tuple[str, Any]
         water_current=water_cur,
         water_target=water_tgt,
         today_weight=today_w,
+        utc_offset=utc_offset,
     )
     kb = get_nutrition_dashboard_keyboard(
         has_meals=bool(meals),
         has_water=(water_cur > 0),
         track_water=track_water,
     )
+    return text, kb
+
+
+async def build_nutrition_goals_view(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Assemble text and keyboard for nutrition goals settings menu (DRY helper)."""
+    goals = await nutrition_repo.get_nutrition_goals(user_id)
+    cals = goals.get("target_calories", 2000)
+    p = goals.get("target_protein", 0.0)
+    f = goals.get("target_fat", 0.0)
+    c = goals.get("target_carbs", 0.0)
+    track_bju = bool(goals.get("track_bju", 1))
+    track_water = bool(goals.get("track_water", 1))
+
+    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
+
+    text = (
+        f"🎯 <b>Настройки целей и отслеживания</b>\n\n"
+        f"🔥 <b>Цель по калориям:</b> <code>{cals} ккал</code>\n"
+        f"📊 <b>Отслеживание БЖУ:</b> {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: <code>{bju_text}</code>)\n"
+        f"💧 <b>Трекер воды:</b> {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
+        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
+        f"чтобы не перегружать экран лишней информацией."
+    )
+    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
     return text, kb
 
 
@@ -71,19 +104,6 @@ async def build_weight_view(user_id: int, local_date: str) -> Tuple[str, Any]:
     text = format_weight_dashboard(stats, local_date, rem_enabled, rem_time)
     kb = get_weight_dashboard_keyboard(rem_enabled)
     return text, kb
-
-
-@router.message(Command("cancel"))
-@router.message(F.text.casefold().in_(["/отмена", "отмена"]))
-async def cmd_cancel(message: Message, state: FSMContext) -> None:
-    """Cancel any active nutrition FSM state."""
-    current_state = await state.get_state()
-    if current_state:
-        await state.clear()
-        await message.answer(
-            "❌ Действие отменено.",
-            reply_markup=get_main_reply_keyboard(),
-        )
 
 
 # =========================================================================
@@ -121,191 +141,127 @@ async def cmd_nutrition_dashboard(
                 carbs=parsed["carbs"],
                 meal_type=parsed["meal_type"],
             )
-            dash_text, kb = await build_nutrition_view(user_id, local_date)
-            type_name = MEAL_TYPE_MAP.get(parsed["meal_type"], "🍏 Перекус")
-            goals = await nutrition_repo.get_nutrition_goals(user_id)
-            track_bju = bool(goals.get("track_bju", 1))
-            macros_note = ""
-            if track_bju and (parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0):
-                macros_note = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
+            if is_widget_enabled():
+                user = await users_repo.get_user(user_id)
+                offset = user.get("utc_offset", 3) if user else 3
+                await send_widget_card(
+                    bot=message.bot,
+                    chat_id=message.chat.id,
+                    user_id=user_id,
+                    view="health",
+                    local_date=local_date,
+                    utc_offset=offset,
+                    reply_markup=get_main_reply_keyboard(),
+                )
+                return
 
+            dash_text, kb = await build_nutrition_view(user_id, local_date)
+            esc_title = html.escape(parsed["title"])
             await message.answer(
-                f"✅ Записано: [{type_name}] **{parsed['title']}** — {parsed['calories']} ккал{macros_note}!\n\n"
-                + dash_text,
+                f"✅ Быстро добавлено: <b>{esc_title}</b> (+{parsed['calories']} ккал)!\n\n" + dash_text,
                 reply_markup=kb,
             )
             return
+
+    if is_widget_enabled():
+        user = await users_repo.get_user(user_id)
+        offset = user.get("utc_offset", 3) if user else 3
+        await send_widget_card(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            view="health",
+            local_date=local_date,
+            utc_offset=offset,
+            reply_markup=get_main_reply_keyboard(),
+        )
+        return
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await message.answer(dash_text, reply_markup=kb)
 
 
-@router.message(Command("snack"))
-async def cmd_quick_snack(message: Message, local_date: str) -> None:
-    """Quick snack logging shortcut (e.g. /snack Яблоко 80 or /snack 150)."""
-    user_id = message.from_user.id
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-
-    if len(parts) < 2:
-        await message.answer(
-            "ℹ️ Отправьте команду вместе с перекусом, например:\n"
-            "• `/snack Кофе с молоком 120`\n"
-            "• `/snack Яблоко 70`\n"
-            "• `/snack 200`\n"
-            "• `/snack Батончик 180 20/4/15`",
-        )
-        return
-
-    parsed = parse_meal_input(parts[1], default_meal_type="snack")
-    if not parsed:
-        await message.answer("⚠️ Не удалось распознать калории. Пример: `/snack Кофе с молоком 120`")
-        return
-
-    await nutrition_repo.add_meal(
-        user_id=user_id,
-        logged_date=local_date,
-        title=parsed["title"],
-        calories=parsed["calories"],
-        protein=parsed["protein"],
-        fat=parsed["fat"],
-        carbs=parsed["carbs"],
-        meal_type="snack",
-    )
-
-    dash_text, kb = await build_nutrition_view(user_id, local_date)
-    goals = await nutrition_repo.get_nutrition_goals(user_id)
-    track_bju = bool(goals.get("track_bju", 1))
-    macros_note = ""
-    if track_bju and (parsed["protein"] > 0 or parsed["fat"] > 0 or parsed["carbs"] > 0):
-        macros_note = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
-
-    await message.answer(
-        f"✅ Перекус добавлен: **{parsed['title']}** (+{parsed['calories']} ккал){macros_note}\n\n" + dash_text,
-        reply_markup=kb,
-    )
-
-
 @router.callback_query(F.data == "nutr_refresh")
 async def cb_nutr_refresh(callback: CallbackQuery, local_date: str, state: FSMContext) -> None:
-    """Refresh nutrition dashboard message."""
+    """Refresh nutrition dashboard view."""
     await state.clear()
     user_id = callback.from_user.id
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     try:
         await callback.message.edit_text(dash_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_nutr_refresh: %s", e)
     await callback.answer("Обновлено")
 
 
-def format_product_card(product: Dict[str, Any], show_macros: bool = True) -> str:
-    """Format product summary card with 100g macros."""
-    name = product["name"]
-    cals = round(float(product["calories_100g"]))
-    p = float(product.get("protein_100g", 0.0))
-    f = float(product.get("fat_100g", 0.0))
-    c = float(product.get("carbs_100g", 0.0))
-    macros_part = f" ({p}Б / {f}Ж / {c}У)" if show_macros else ""
-    return (
-        f"🔍 **{name}**\n\n"
-        f"📊 **На 100 грамм:** `{cals} ккал`{macros_part}\n\n"
-        f"Выберите размер порции или укажите свой вес:"
+@router.callback_query(F.data == "nutr_add_entry")
+async def cb_nutr_add_entry(callback: CallbackQuery, state: FSMContext) -> None:
+    """Choose meal category (breakfast, lunch, dinner, snack)."""
+    await state.clear()
+    text = (
+        "🍽 <b>Выберите прием пищи:</b>\n\n"
+        "Куда записать блюдо или продукт?"
     )
-
-
-@router.callback_query(F.data == "nutr_add")
-async def cb_nutr_add(callback: CallbackQuery, state: FSMContext) -> None:
-    """Prompt user to choose meal category or enter directly, showing frequent meals."""
-    user_id = callback.from_user.id
-    frequent = await nutrition_repo.get_frequent_meals(user_id, limit=4)
-    await state.set_state(NutritionStates.waiting_for_meal_text)
-    await state.update_data(meal_type="snack")
-
-    prompt_text = "🍽 **Добавление приема пищи**\n\n"
-    if frequent:
-        prompt_text += "⚡ **Ваши частые блюда (быстрый ввод в 1 клик):**\n"
-        prompt_text += "Либо выберите категорию или напишите название продукта/калории:"
-    else:
-        prompt_text += (
-            "Выберите категорию или отправьте название продукта (например: `банан`, `гречка`, `курица`):\n\n"
-            "Либо отправьте сразу с калориями: `Кофе с молоком 120`."
-        )
-
-    await callback.message.edit_text(
-        prompt_text,
-        reply_markup=get_meal_category_inline_keyboard(frequent_meals=frequent),
-        parse_mode="Markdown",
-    )
+    await callback.message.edit_text(text, reply_markup=get_meal_category_inline_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("nutr_cat:"))
-async def cb_nutr_cat(callback: CallbackQuery, state: FSMContext) -> None:
-    """Handle meal category selection."""
+@router.callback_query(F.data.startswith("meal_type:"))
+async def cb_select_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
+    """Show quick favorites or prompt for food entry for chosen meal type."""
     meal_type = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-    await state.set_state(NutritionStates.waiting_for_meal_text)
     await state.update_data(meal_type=meal_type)
+    user_id = callback.from_user.id
 
-    type_name = MEAL_TYPE_MAP.get(meal_type, "Прием пищи")
-    frequent = await nutrition_repo.get_frequent_meals(user_id, meal_type=meal_type, limit=4)
+    type_name = MEAL_TYPE_MAP.get(meal_type, "🍏 Перекус")
+    recent_meals = await nutrition_repo.get_recent_meals_by_type(user_id, meal_type, limit=4)
 
-    prompt_lines = [
-        f"✍️ Категория: **{type_name}**\n",
-    ]
-    if frequent:
-        prompt_lines.append("⚡ **Ваши частые блюда в этой категории:**\n")
-    prompt_lines.append(
-        "Напишите название продукта (например: `банан`, `овсянка`, `яйцо`),\n"
-        "или укажите свои калории (например: `Творог 180 20/4/3` или `250`).\n\n"
-        "_(Отправьте /cancel для отмены)_"
+    text = (
+        f"➕ <b>Добавить: {type_name}</b>\n\n"
+        "Напишите название блюда или продукта.\n"
+        "Вы можете указать калории вручную или найти продукт в базе:\n\n"
+        "• <code>Банан</code> или <code>Творог 5%</code> — поиск по базе с порциями\n"
+        "• <code>Кофе с круассаном 340</code> — ручной ввод с калориями\n"
+        "• <code>Грудка 180 30/3/0</code> — с калориями и БЖУ (Б/Ж/У)\n\n"
+        "<i>(Отправьте /cancel для отмены)</i>"
     )
 
-    await callback.message.edit_text(
-        "\n".join(prompt_lines),
-        reply_markup=get_meal_input_inline_keyboard(frequent_meals=frequent),
-        parse_mode="Markdown",
-    )
+    kb = get_meal_input_inline_keyboard(recent_meals=recent_meals)
+    await state.set_state(NutritionStates.waiting_for_meal_text)
+    await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("meal_repeat:"))
-async def cb_meal_repeat(
+@router.callback_query(F.data.startswith("quick_meal:"))
+async def cb_quick_meal(
     callback: CallbackQuery,
     local_date: str,
     state: FSMContext,
 ) -> None:
-    """Instantly log a frequent meal in 1 click."""
-    meal_id = int(callback.data.split(":")[1])
+    """Quick 1-click addition of a favorite/recent meal."""
+    parts = callback.data.split(":")
+    meal_id = int(parts[1])
     user_id = callback.from_user.id
-    meal = await nutrition_repo.get_meal_by_id(meal_id, user_id)
-    if not meal:
-        await callback.answer("Блюдо не найдено.", show_alert=True)
-        return
 
     data = await state.get_data()
-    chosen_type = data.get("meal_type") or meal.get("meal_type") or "snack"
+    chosen_type = data.get("meal_type", "snack")
     await state.clear()
 
-    added = await nutrition_repo.add_meal(
-        user_id=user_id,
-        logged_date=local_date,
-        title=meal["title"],
-        calories=meal["calories"],
-        protein=meal["protein"],
-        fat=meal["fat"],
-        carbs=meal["carbs"],
-        meal_type=chosen_type,
-    )
+    added = await nutrition_repo.repeat_meal(meal_id, user_id, local_date, target_meal_type=chosen_type)
+    if not added:
+        await callback.answer("Блюдо не найдено в недавних.", show_alert=True)
+        return
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
-    await callback.message.edit_text(
-        f"✅ Добавлено в 1 клик: [{type_name}] **{added['title']}** (+{added['calories']} ккал)!\n\n" + dash_text,
-        reply_markup=kb,
-        parse_mode="Markdown",
-    )
+    esc_title = html.escape(added["title"])
+    try:
+        await callback.message.edit_text(
+            f"✅ Добавлено в 1 клик: [{type_name}] <b>{esc_title}</b> (+{added['calories']} ккал)!\n\n" + dash_text,
+            reply_markup=kb,
+        )
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_quick_meal: %s", e)
     await callback.answer(f"«{added['title']}» (+{added['calories']} ккал) записано!")
 
 
@@ -320,8 +276,18 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
     data = await state.get_data()
     chosen_type = data.get("meal_type", "snack")
 
-    # 1. Try manual entry parser first (if user explicitly provided numbers)
-    parsed = parse_meal_input(raw_text, default_meal_type=chosen_type)
+    # Check for exact or strong catalog matches first (e.g. Творог 5%, Кефир 1%, Молоко 2.5%, Яйцо)
+    catalog_matches = await food_repo.search_food(raw_text, limit=5)
+    has_exact_catalog = bool(
+        catalog_matches
+        and catalog_matches[0]["name"].casefold() == raw_text.casefold()
+    )
+
+    # 1. Try manual entry parser if there is NO exact catalog match
+    parsed = None
+    if not has_exact_catalog:
+        parsed = parse_meal_input(raw_text, default_meal_type=chosen_type)
+
     if parsed:
         await state.clear()
         await nutrition_repo.add_meal(
@@ -342,27 +308,27 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
             macros_info = f" ({parsed['protein']}Б / {parsed['fat']}Ж / {parsed['carbs']}У)"
 
         dash_text, kb = await build_nutrition_view(user_id, local_date)
+        esc_title = html.escape(parsed["title"])
         await message.answer(
-            f"✅ Добавлено: [{type_name}] **{parsed['title']}** — {parsed['calories']} ккал{macros_info}!\n\n"
+            f"✅ Добавлено: [{type_name}] <b>{esc_title}</b> — {parsed['calories']} ккал{macros_info}!\n\n"
             + dash_text,
             reply_markup=kb,
-            parse_mode="Markdown",
         )
         return
 
-    # 2. If no calories provided, search local food database
+    # 2. If no calories provided or matched catalog, search local food database
     goals = await nutrition_repo.get_nutrition_goals(user_id)
     track_bju = bool(goals.get("track_bju", 1))
 
-    matches = await food_repo.search_food(raw_text, limit=5)
+    matches = catalog_matches if catalog_matches is not None else await food_repo.search_food(raw_text, limit=5)
+    esc_raw = html.escape(raw_text)
     if not matches:
         await message.answer(
-            f"🔍 По запросу «**{raw_text}**» продуктов в базе не найдено.\n\n"
+            f"🔍 По запросу «<b>{esc_raw}</b>» продуктов в базе не найдено.\n\n"
             f"Вы можете записать блюдо вручную с калориями, например:\n"
-            f"• `{raw_text} 250`\n"
-            f"• `{raw_text} 180 20/4/3` _(ккал Б/Ж/У)_\n\n"
-            f"_(Или отправьте /cancel для отмены)_",
-            parse_mode="Markdown",
+            f"• <code>{esc_raw} 250</code>\n"
+            f"• <code>{esc_raw} 180 20/4/3</code> <i>(ккал Б/Ж/У)</i>\n\n"
+            f"<i>(Или отправьте /cancel для отмены)</i>",
         )
         return
 
@@ -373,16 +339,14 @@ async def process_meal_input(message: Message, state: FSMContext, local_date: st
         await message.answer(
             card_text,
             reply_markup=get_food_portions_keyboard(prod),
-            parse_mode="Markdown",
         )
         return
 
     # Multiple matches found -> show list to choose from
     await message.answer(
-        f"🔍 Найдено несколько вариантов по запросу «**{raw_text}**»:\n"
+        f"🔍 Найдено несколько вариантов по запросу «<b>{esc_raw}</b>»:\n"
         f"Выберите подходящий продукт:",
         reply_markup=get_food_search_results_keyboard(matches),
-        parse_mode="Markdown",
     )
 
 
@@ -403,12 +367,9 @@ async def cb_food_pick(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             card_text,
             reply_markup=get_food_portions_keyboard(product),
-            parse_mode="Markdown",
         )
-    except Exception:
-        pass
-    await callback.answer()
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_food_pick: %s", e)
     await callback.answer()
 
 
@@ -459,54 +420,58 @@ async def cb_food_portion(
     type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
     goals = await nutrition_repo.get_nutrition_goals(user_id)
     track_bju = bool(goals.get("track_bju", 1))
-    macros_part = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)" if track_bju else ""
+    macros_info = ""
+    if track_bju:
+        macros_info = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)"
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
-    await callback.message.edit_text(
-        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал"
-        f"{macros_part}!\n\n" + dash_text,
-        reply_markup=kb,
-        parse_mode="Markdown",
-    )
-    await callback.answer(f"«{product['name']}» (+{macros['calories']} ккал) добавлено!")
+    esc_title = html.escape(title)
+    try:
+        await callback.message.edit_text(
+            f"✅ Добавлено: [{type_name}] <b>{esc_title}</b> — {macros['calories']} ккал{macros_info}!\n\n"
+            + dash_text,
+            reply_markup=kb,
+        )
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_food_portion: %s", e)
+    await callback.answer(f"«{title}» добавлено!")
 
 
-@router.callback_query(F.data.startswith("food_custom_g:"))
-async def cb_food_custom_g(callback: CallbackQuery, state: FSMContext) -> None:
-    """Prompt user to type custom grams for selected product."""
+@router.callback_query(F.data.startswith("food_grams:"))
+async def cb_food_grams(callback: CallbackQuery, state: FSMContext) -> None:
+    """Prompt user to type exact grams for catalog product."""
     food_id = int(callback.data.split(":")[1])
     product = await food_repo.get_food_by_id(food_id)
     if not product:
         await callback.answer("Продукт не найден.", show_alert=True)
         return
 
-    await state.set_state(NutritionStates.waiting_for_product_grams)
     await state.update_data(chosen_food_id=food_id)
+    await state.set_state(NutritionStates.waiting_for_product_grams)
+
+    esc_pname = html.escape(product["name"])
     await callback.message.edit_text(
-        f"✍️ **Введите вес в граммах для «{product['name']}»:**\n\n"
-        f"_(Например: `140` или `250`, отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        f"⚖️ <b>«{esc_pname}»</b>\n\n"
+        f"Введите вес порции в граммах (число от 1 до 5000):\n"
+        f"<i>(Например: <code>140</code> или <code>250</code>, отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
 
 @router.message(NutritionStates.waiting_for_product_grams)
-async def process_custom_product_grams(
-    message: Message,
-    state: FSMContext,
-    local_date: str,
-) -> None:
-    """Handle custom grams text entry."""
+async def process_custom_grams(message: Message, state: FSMContext, local_date: str) -> None:
+    """Process user input of exact grams."""
     raw_text = (message.text or "").strip()
-    if raw_text.startswith("/"):
-        return
-
     match = re.search(r"\d+", raw_text)
-    if not match or int(match.group(0)) <= 0 or int(match.group(0)) > 5000:
+    if not match:
         await message.answer("⚠️ Пожалуйста, введите положительное число грамм от 1 до 5000 (или /cancel):")
         return
 
     grams = float(match.group(0))
+    if grams <= 0 or grams > 5000:
+        await message.answer("⚠️ Пожалуйста, введите корректный вес от 1 до 5000 грамм:")
+        return
+
     data = await state.get_data()
     food_id = data.get("chosen_food_id")
     chosen_type = data.get("meal_type", "snack")
@@ -514,12 +479,12 @@ async def process_custom_product_grams(
 
     product = await food_repo.get_food_by_id(food_id)
     if not product:
-        await message.answer("⚠️ Продукт не найден.", reply_markup=get_main_reply_keyboard())
+        await message.answer("⚠️ Продукт не найден в базе.", reply_markup=get_main_reply_keyboard())
         return
 
     macros = food_repo.calculate_portion_macros(product, grams)
-    user_id = message.from_user.id
     title = f"{product['name']} ({int(grams)}г)"
+    user_id = message.from_user.id
 
     await nutrition_repo.add_meal(
         user_id=user_id,
@@ -535,20 +500,22 @@ async def process_custom_product_grams(
     type_name = MEAL_TYPE_MAP.get(chosen_type, "🍏 Перекус")
     goals = await nutrition_repo.get_nutrition_goals(user_id)
     track_bju = bool(goals.get("track_bju", 1))
-    macros_part = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)" if track_bju else ""
+    macros_info = ""
+    if track_bju:
+        macros_info = f" ({macros['protein']}Б / {macros['fat']}Ж / {macros['carbs']}У)"
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
+    esc_title = html.escape(title)
     await message.answer(
-        f"✅ Добавлено: [{type_name}] **{title}** — {macros['calories']} ккал"
-        f"{macros_part}!\n\n" + dash_text,
+        f"✅ Добавлено: [{type_name}] <b>{esc_title}</b> — {macros['calories']} ккал{macros_info}!\n\n"
+        + dash_text,
         reply_markup=kb,
-        parse_mode="Markdown",
     )
 
 
-@router.callback_query(F.data == "nutr_delete_menu")
-async def cb_nutr_delete_menu(callback: CallbackQuery, local_date: str) -> None:
-    """Show list of meals to delete."""
+@router.callback_query(F.data == "nutr_del_menu")
+async def cb_nutr_del_menu(callback: CallbackQuery, local_date: str) -> None:
+    """Show list of today's meals to delete."""
     user_id = callback.from_user.id
     meals = await nutrition_repo.get_meals_for_date(user_id, local_date)
     if not meals:
@@ -556,7 +523,7 @@ async def cb_nutr_delete_menu(callback: CallbackQuery, local_date: str) -> None:
         return
 
     await callback.message.edit_text(
-        "🗑 **Выберите запись, которую хотите удалить:**",
+        "🗑 <b>Выберите запись, которую хотите удалить:</b>",
         reply_markup=get_meals_delete_keyboard(meals),
     )
     await callback.answer()
@@ -580,8 +547,8 @@ async def cb_nutr_del_item(callback: CallbackQuery, local_date: str) -> None:
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     try:
         await callback.message.edit_text(dash_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_nutr_del_item: %s", e)
 
 
 @router.callback_query(F.data == "nutr_set_goal")
@@ -589,26 +556,11 @@ async def cb_nutr_set_goal(callback: CallbackQuery, state: FSMContext) -> None:
     """Open nutrition goals and tracking settings menu."""
     await state.clear()
     user_id = callback.from_user.id
-    goals = await nutrition_repo.get_nutrition_goals(user_id)
-    cals = goals.get("target_calories", 2000)
-    p = goals.get("target_protein", 0.0)
-    f = goals.get("target_fat", 0.0)
-    c = goals.get("target_carbs", 0.0)
-    track_bju = bool(goals.get("track_bju", 1))
-    track_water = bool(goals.get("track_water", 1))
-
-    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
-
-    text = (
-        f"🎯 **Настройки целей и отслеживания**\n\n"
-        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
-        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
-        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
-        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
-        f"чтобы не перегружать экран лишней информацией."
-    )
-    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    text, kb = await build_nutrition_goals_view(user_id)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_nutr_set_goal: %s", e)
     await callback.answer()
 
 
@@ -620,28 +572,11 @@ async def cb_nutr_toggle_bju(callback: CallbackQuery) -> None:
     state_str = "включен ✅" if new_state else "выключен ❌"
     await callback.answer(f"Учет БЖУ {state_str}")
 
-    goals = await nutrition_repo.get_nutrition_goals(user_id)
-    cals = goals.get("target_calories", 2000)
-    p = goals.get("target_protein", 0.0)
-    f = goals.get("target_fat", 0.0)
-    c = goals.get("target_carbs", 0.0)
-    track_bju = bool(goals.get("track_bju", 1))
-    track_water = bool(goals.get("track_water", 1))
-
-    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
-    text = (
-        f"🎯 **Настройки целей и отслеживания**\n\n"
-        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
-        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
-        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
-        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
-        f"чтобы не перегружать экран лишней информацией."
-    )
-    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
+    text, kb = await build_nutrition_goals_view(user_id)
     try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    except Exception:
-        pass
+        await callback.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_nutr_toggle_bju: %s", e)
 
 
 @router.callback_query(F.data == "nutr_toggle_water")
@@ -652,28 +587,11 @@ async def cb_nutr_toggle_water(callback: CallbackQuery) -> None:
     state_str = "включен ✅" if new_state else "выключен ❌"
     await callback.answer(f"Трекер воды {state_str}")
 
-    goals = await nutrition_repo.get_nutrition_goals(user_id)
-    cals = goals.get("target_calories", 2000)
-    p = goals.get("target_protein", 0.0)
-    f = goals.get("target_fat", 0.0)
-    c = goals.get("target_carbs", 0.0)
-    track_bju = bool(goals.get("track_bju", 1))
-    track_water = bool(goals.get("track_water", 1))
-
-    bju_text = f"{p}Б / {f}Ж / {c}У" if (p > 0 or f > 0 or c > 0) else "не задано"
-    text = (
-        f"🎯 **Настройки целей и отслеживания**\n\n"
-        f"🔥 **Цель по калориям:** `{cals} ккал`\n"
-        f"📊 **Отслеживание БЖУ:** {'Включено ✅' if track_bju else 'Выключено ❌'} (норма: `{bju_text}`)\n"
-        f"💧 **Трекер воды:** {'Включен ✅' if track_water else 'Выключен ❌'}\n\n"
-        f"Здесь вы можете изменить суточную калорийность или в 1 клик отключить учет воды или БЖУ, "
-        f"чтобы не перегружать экран лишней информацией."
-    )
-    kb = get_nutrition_goals_menu_keyboard(track_bju=track_bju, track_water=track_water)
+    text, kb = await build_nutrition_goals_view(user_id)
     try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    except Exception:
-        pass
+        await callback.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_nutr_toggle_water: %s", e)
 
 
 @router.callback_query(F.data == "nutr_change_cals")
@@ -684,10 +602,10 @@ async def cb_nutr_change_cals(callback: CallbackQuery, state: FSMContext) -> Non
     current_cals = goals.get("target_calories", 2000)
 
     await callback.message.edit_text(
-        f"🎯 **Настройка суточной нормы калорий**\n\n"
-        f"Текущая цель: **{current_cals} ккал**.\n\n"
-        f"Введите желаемую суточную норму калорий (например: `2100`):\n"
-        f"_(Или отправьте /cancel для отмены)_"
+        f"🎯 <b>Настройка суточной нормы калорий</b>\n\n"
+        f"Текущая цель: <b>{current_cals} ккал</b>.\n\n"
+        f"Введите желаемую суточную норму калорий (например: <code>2100</code>):\n"
+        f"<i>(Или отправьте /cancel для отмены)</i>"
     )
     await state.set_state(NutritionStates.waiting_for_calories_goal)
     await callback.answer()
@@ -699,7 +617,7 @@ async def process_calorie_goal(message: Message, state: FSMContext, local_date: 
     text = (message.text or "").strip()
     match = re.search(r"\d+", text)
     if not match:
-        await message.answer("⚠️ Введите число (например: `2000`) или отправьте /cancel.")
+        await message.answer("⚠️ Введите число (например: <code>2000</code>) или отправьте /cancel.")
         return
 
     cals = int(match.group(0))
@@ -723,7 +641,7 @@ async def process_calorie_goal(message: Message, state: FSMContext, local_date: 
         )
         dash_text, kb = await build_nutrition_view(user_id, local_date)
         await message.answer(
-            f"🎉 **Ваша норма калорий успешно сохранена: {cals} ккал!**\n\n" + dash_text,
+            f"🎉 <b>Ваша норма калорий успешно сохранена: {cals} ккал!</b>\n\n" + dash_text,
             reply_markup=kb,
         )
         return
@@ -732,11 +650,11 @@ async def process_calorie_goal(message: Message, state: FSMContext, local_date: 
     await state.set_state(NutritionStates.waiting_for_bju_goal)
 
     await message.answer(
-        f"✅ Цель по калориям: **{cals} ккал**!\n\n"
-        f"Хотите также задать суточную норму **БЖУ (в граммах)**?\n"
+        f"✅ Цель по калориям: <b>{cals} ккал</b>!\n\n"
+        f"Хотите также задать суточную норму <b>БЖУ (в граммах)</b>?\n"
         f"Отправьте три числа через пробел (Белки Жиры Углеводы), например:\n"
-        f"`130 65 250`\n\n"
-        f"Или отправьте **/skip**, чтобы оставить БЖУ необязательными."
+        f"<code>130 65 250</code>\n\n"
+        f"Или отправьте <b>/skip</b>, чтобы оставить БЖУ необязательными."
     )
 
 
@@ -751,14 +669,19 @@ async def process_bju_goal(message: Message, state: FSMContext, local_date: str)
     p, f, c = 0.0, 0.0, 0.0
     if text.lower() not in ("/skip", "skip", "пропустить", "-"):
         nums = re.findall(r"\d+(?:[.,]\d+)?", text)
-        if len(nums) >= 3:
+        if len(nums) == 1:
+            p = float(nums[0].replace(",", "."))
+        elif len(nums) == 2:
+            p = float(nums[0].replace(",", "."))
+            f = float(nums[1].replace(",", "."))
+        elif len(nums) >= 3:
             p = float(nums[0].replace(",", "."))
             f = float(nums[1].replace(",", "."))
             c = float(nums[2].replace(",", "."))
         else:
             await message.answer(
-                "⚠️ Введите 3 числа (Белки Жиры Углеводы), например: `130 65 250`,\n"
-                "или отправьте **/skip**, чтобы оставить БЖУ свободными."
+                "⚠️ Введите 3 числа (Белки Жиры Углеводы), например: <code>130 65 250</code>,\n"
+                "или отправьте <b>/skip</b>, чтобы оставить БЖУ свободными."
             )
             return
 
@@ -772,9 +695,9 @@ async def process_bju_goal(message: Message, state: FSMContext, local_date: str)
     )
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
-    macros_msg = f" (Б: {p}г, Ж: {f}г, У: {c}г)" if p > 0 else " (без ограничений по БЖУ)"
+    macros_msg = f" (Б: {p}г, Ж: {f}г, У: {c}г)" if (p > 0 or f > 0 or c > 0) else " (без ограничений по БЖУ)"
     await message.answer(
-        f"🎉 **Ваша норма успешно сохранена!**\n"
+        f"🎉 <b>Ваша норма успешно сохранена!</b>\n"
         f"🎯 {cals} ккал{macros_msg}\n\n"
         + dash_text,
         reply_markup=kb,
@@ -799,8 +722,8 @@ async def cb_water_add(callback: CallbackQuery, local_date: str) -> None:
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     try:
         await callback.message.edit_text(dash_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_water_add: %s", e)
 
 
 @router.callback_query(F.data == "water_undo")
@@ -817,17 +740,17 @@ async def cb_water_undo(callback: CallbackQuery, local_date: str) -> None:
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     try:
         await callback.message.edit_text(dash_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_water_undo: %s", e)
 
 
 @router.callback_query(F.data == "water_custom")
 async def cb_water_custom(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to enter custom amount of water."""
     await callback.message.edit_text(
-        "💧 **Добавление воды**\n\n"
-        "Введите количество выпитой воды в миллилитрах (например: `350` или `600`):\n"
-        "_(Отправьте /cancel для отмены)_"
+        "💧 <b>Добавление воды</b>\n\n"
+        "Введите количество выпитой воды в миллилитрах (например: <code>350</code> или <code>600</code>):\n"
+        "<i>(Отправьте /cancel для отмены)</i>"
     )
     await state.set_state(NutritionStates.waiting_for_water_amount)
     await callback.answer()
@@ -838,15 +761,15 @@ async def process_custom_water(message: Message, state: FSMContext, local_date: 
     """Process custom water milliliters."""
     user_id = message.from_user.id
     text = (message.text or "").strip()
-    match = re.search(r"\d+", text)
+    match = re.search(r"-?\d+", text)
 
     if not match:
-        await message.answer("⚠️ Введите число в миллилитрах (например: `300`) или отправьте /cancel.")
+        await message.answer("⚠️ Введите число в миллилитрах (например: <code>300</code>) или отправьте /cancel.")
         return
 
     amount_ml = int(match.group(0))
-    if amount_ml <= 0 or amount_ml > 5000:
-        await message.answer("⚠️ Пожалуйста, введите объем от 1 до 5000 мл.")
+    if amount_ml < 1 or amount_ml > 5000:
+        await message.answer("⚠️ Пожалуйста, введите объем от 1 до 5000 мл (или /cancel).")
         return
 
     await state.clear()
@@ -855,7 +778,7 @@ async def process_custom_water(message: Message, state: FSMContext, local_date: 
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await message.answer(
-        f"💧 Добавлено: **+{amount_ml} мл** воды! (Всего: {new_total}/{target_ml} мл)\n\n"
+        f"💧 Добавлено: <b>+{amount_ml} мл</b> воды! (Всего: {new_total}/{target_ml} мл)\n\n"
         + dash_text,
         reply_markup=kb,
     )
@@ -864,28 +787,32 @@ async def process_custom_water(message: Message, state: FSMContext, local_date: 
 @router.message(Command("water"))
 @router.message(Command("вода"))
 async def cmd_quick_water(message: Message, local_date: str) -> None:
-    """Quick water command e.g. /water 350 or /вода 500."""
+    """Quick water command e.g. /water 350 or /вода 500 with strict range validation."""
     user_id = message.from_user.id
     text = (message.text or "").strip()
-    match = re.search(r"\d+", text)
+    match = re.search(r"-?\d+", text)
 
     if not match:
         target_ml = await water_repo.get_water_target(user_id)
         cur_ml = await water_repo.get_daily_water(user_id, local_date)
         await message.answer(
-            f"💧 **Трекер воды**\n"
-            f"Сегодня выпито: **{cur_ml}** / {target_ml} мл\n\n"
-            f"Чтобы добавить воду быстро, отправьте, например: `/water 250` или нажмите кнопку в меню «🥗 Питание»."
+            f"💧 <b>Трекер воды</b>\n"
+            f"Сегодня выпито: <b>{cur_ml}</b> / {target_ml} мл\n\n"
+            f"Чтобы добавить воду быстро, отправьте, например: <code>/water 250</code> или нажмите кнопку в меню «🥗 Питание»."
         )
         return
 
     amount_ml = int(match.group(0))
+    if amount_ml < 1 or amount_ml > 5000:
+        await message.answer("⚠️ Пожалуйста, укажите объем воды от 1 до 5000 мл (например: <code>/water 250</code>).")
+        return
+
     new_total = await water_repo.add_water(user_id, local_date, amount_ml)
     target_ml = await water_repo.get_water_target(user_id)
 
     dash_text, kb = await build_nutrition_view(user_id, local_date)
     await message.answer(
-        f"💧 Добавлено: **+{amount_ml} мл** воды! (Сегодня: {new_total}/{target_ml} мл)\n\n"
+        f"💧 Добавлено: <b>+{amount_ml} мл</b> воды! (Сегодня: {new_total}/{target_ml} мл)\n\n"
         + dash_text,
         reply_markup=kb,
     )
@@ -912,7 +839,7 @@ async def cmd_weight(message: Message, local_date: str, state: FSMContext) -> No
             if 20.0 <= w_val <= 300.0:
                 await weight_repo.log_weight(user_id, local_date, w_val)
                 w_text, kb = await build_weight_view(user_id, local_date)
-                await message.answer(f"✅ Вес записан: **{w_val} кг**!\n\n" + w_text, reply_markup=kb)
+                await message.answer(f"✅ Вес записан: <b>{w_val} кг</b>!\n\n" + w_text, reply_markup=kb)
                 return
 
     w_text, kb = await build_weight_view(user_id, local_date)
@@ -927,8 +854,8 @@ async def cb_weight_menu(callback: CallbackQuery, local_date: str, state: FSMCon
     w_text, kb = await build_weight_view(user_id, local_date)
     try:
         await callback.message.edit_text(w_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_weight_menu: %s", e)
     await callback.answer()
 
 
@@ -936,9 +863,9 @@ async def cb_weight_menu(callback: CallbackQuery, local_date: str, state: FSMCon
 async def cb_weight_enter(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type their weight."""
     await callback.message.edit_text(
-        "⚖️ **Запись утреннего веса**\n\n"
-        "Отправьте ваш текущий вес в килограммах (например: `72.4` или `73`):\n"
-        "_(Отправьте /cancel для отмены)_"
+        "⚖️ <b>Запись утреннего веса</b>\n\n"
+        "Отправьте ваш текущий вес в килограммах (например: <code>72.4</code> или <code>73</code>):\n"
+        "<i>(Отправьте /cancel для отмены)</i>"
     )
     await state.set_state(NutritionStates.waiting_for_weight_input)
     await callback.answer()
@@ -952,7 +879,7 @@ async def process_weight_input(message: Message, state: FSMContext, local_date: 
     match = re.search(r"\d+(?:[.,]\d+)?", text)
 
     if not match:
-        await message.answer("⚠️ Введите число (например: `72.5`) или отправьте /cancel.")
+        await message.answer("⚠️ Введите число (например: <code>72.5</code>) или отправьте /cancel.")
         return
 
     w_val = float(match.group(0).replace(",", "."))
@@ -964,7 +891,7 @@ async def process_weight_input(message: Message, state: FSMContext, local_date: 
     await weight_repo.log_weight(user_id, local_date, w_val)
 
     w_text, kb = await build_weight_view(user_id, local_date)
-    await message.answer(f"✅ Вес записан: **{w_val} кг**!\n\n" + w_text, reply_markup=kb)
+    await message.answer(f"✅ Вес записан: <b>{w_val} кг</b>!\n\n" + w_text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "weight_toggle_reminder")
@@ -982,15 +909,15 @@ async def cb_weight_toggle_reminder(callback: CallbackQuery, local_date: str) ->
     w_text, kb = await build_weight_view(user_id, local_date)
     try:
         await callback.message.edit_text(w_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_weight_toggle_reminder: %s", e)
 
 
 @router.callback_query(F.data == "weight_choose_time")
 async def cb_weight_choose_time(callback: CallbackQuery) -> None:
     """Show preset times for morning weight notification."""
     await callback.message.edit_text(
-        "⏰ **Во сколько присылать утреннее напоминание о взвешивании?**\n\n"
+        "⏰ <b>Во сколько присылать утреннее напоминание о взвешивании?</b>\n\n"
         "Выберите удобное время или введите своё вручную:",
         reply_markup=get_weight_reminder_time_keyboard(),
     )
@@ -1010,17 +937,17 @@ async def cb_weight_set_time(callback: CallbackQuery, local_date: str) -> None:
     w_text, kb = await build_weight_view(user_id, local_date)
     try:
         await callback.message.edit_text(w_text, reply_markup=kb)
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_weight_set_time: %s", e)
 
 
 @router.callback_query(F.data == "weight_custom_time")
 async def cb_weight_custom_time(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type custom reminder time."""
     await callback.message.edit_text(
-        "✍️ **Введите желаемое время утреннего напоминания**\n\n"
-        "Формат: `ЧЧ:ММ` (например: `07:15`, `08:45` или `09:00`):\n"
-        "_(Отправьте /cancel для отмены)_"
+        "✍️ <b>Введите желаемое время утреннего напоминания</b>\n\n"
+        "Формат: <code>ЧЧ:ММ</code> (например: <code>07:15</code>, <code>08:45</code> или <code>09:00</code>):\n"
+        "<i>(Отправьте /cancel для отмены)</i>"
     )
     await state.set_state(NutritionStates.waiting_for_weight_reminder_time)
     await callback.answer()
@@ -1035,7 +962,7 @@ async def process_custom_weight_time(message: Message, state: FSMContext, local_
 
     if not match:
         await message.answer(
-            "⚠️ Неверный формат времени. Введите время в формате `ЧЧ:ММ`, например: `07:45`.\n"
+            "⚠️ Неверный формат времени. Введите время в формате <code>ЧЧ:ММ</code>, например: <code>07:45</code>.\n"
             "Или отправьте /cancel."
         )
         return
@@ -1049,7 +976,7 @@ async def process_custom_weight_time(message: Message, state: FSMContext, local_
 
     w_text, kb = await build_weight_view(user_id, local_date)
     await message.answer(
-        f"✅ Время утреннего взвешивания установлено на **{time_str}** (напоминание включено)!\n\n"
+        f"✅ Время утреннего взвешивания установлено на <b>{time_str}</b> (напоминание включено)!\n\n"
         + w_text,
         reply_markup=kb,
     )

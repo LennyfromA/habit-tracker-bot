@@ -155,6 +155,18 @@ CREATE TABLE IF NOT EXISTS food_database (
     portions_json TEXT NOT NULL DEFAULT '[]'
 );
 
+CREATE TABLE IF NOT EXISTS widget_messages (
+    wid TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    view_type TEXT NOT NULL DEFAULT 'dashboard',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_widget_messages_user ON widget_messages(user_id, view_type);
+
 CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_user_date ON habit_logs(user_id, logged_date);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_habit_date ON habit_logs(habit_id, logged_date);
@@ -172,7 +184,7 @@ async def get_db(db_path: Optional[str] = None) -> AsyncGenerator[aiosqlite.Conn
     target_path = db_path or settings.DB_PATH
     async with aiosqlite.connect(target_path) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
-        await db.execute("PRAGMA journal_mode = WAL;")
+        await db.execute("PRAGMA busy_timeout = 5000;")
         db.row_factory = aiosqlite.Row
         yield db
 
@@ -182,6 +194,8 @@ async def init_db(db_path: Optional[str] = None) -> None:
     target_path = db_path or settings.DB_PATH
     logger.info("Initializing database at: %s", target_path)
     async with aiosqlite.connect(target_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON;")
+        await db.execute("PRAGMA journal_mode = WAL;")
         db.row_factory = aiosqlite.Row
         await db.executescript(INIT_SQL)
 
@@ -222,6 +236,6 @@ async def init_db(db_path: Optional[str] = None) -> None:
 
     # Seed food catalog if table is empty
     from bot.database.food_repo import seed_food_catalog_if_empty
-    await seed_food_catalog_if_empty()
+    await seed_food_catalog_if_empty(target_path)
 
     logger.info("Database initialized successfully.")

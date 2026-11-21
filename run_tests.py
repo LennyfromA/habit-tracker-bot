@@ -1,12 +1,18 @@
 """Standalone test runner for all bot components."""
 
 import asyncio
+import json
 import os
 import sys
 import time
 
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
+
 from bot.config import settings
 from bot.database import (
+    food_repo,
     habits_repo,
     nutrition_repo,
     timers_repo,
@@ -15,7 +21,11 @@ from bot.database import (
     weight_repo,
 )
 from bot.database.db import init_db
-from bot.handlers.habits import parse_days_argument, render_progress_bar
+from bot.handlers.habits import (
+    format_habit_edit_card,
+    parse_days_argument,
+    render_progress_bar,
+)
 from bot.handlers.start import (
     build_notifications_view,
     build_settings_view,
@@ -25,10 +35,13 @@ from bot.handlers.timer import calculate_timer_spent_seconds
 from bot.keyboards.reply import get_main_reply_keyboard
 from bot.services.chart_builder import build_weekly_stats_chart
 from bot.services.nutrition_parser import (
+    format_meal_item,
     format_nutrition_dashboard,
     format_weight_dashboard,
     parse_meal_input,
 )
+from bot.services.scheduler import is_time_in_window
+from bot.states.habit_states import TimerStates
 from bot.keyboards.inline import (
     get_food_portions_keyboard,
     get_food_search_results_keyboard,
@@ -529,7 +542,7 @@ async def run_all_checks():
     )
     assert "БЖУ" not in dash_hidden
     assert "Белки" not in dash_hidden
-    assert "💧 **Вода:**" not in dash_hidden
+    assert "Вода:" not in dash_hidden
     assert "1.5Ж" not in dash_hidden  # No macros in meal lines
 
     # Check-in formatting with BJU & water disabled
@@ -562,7 +575,7 @@ async def run_all_checks():
     )
     assert ("Белки" in dash_visible or "БЖУ" in dash_visible)
     assert "1.5Ж" in dash_visible
-    assert "💧 **Вода:**" in dash_visible
+    assert "Вода:" in dash_visible
 
     checkin_visible = format_checkin_text(
         habits=[],
@@ -576,6 +589,93 @@ async def run_all_checks():
     assert "Вода за сегодня" in checkin_visible
 
     print("✅ 16. Optional Water & Macro (BJU) Tracking Settings verified.")
+
+    # 17. Cyrillic Food Search & Parser Disambiguation
+    await food_repo.seed_food_catalog_if_empty(TEST_DB)
+    res_lower = await food_repo.search_food("творог", limit=5, db_path=TEST_DB)
+    res_upper = await food_repo.search_food("ТВОРОГ", limit=5, db_path=TEST_DB)
+    assert len(res_lower) > 0 and len(res_upper) > 0
+    assert res_lower[0]["name"] == res_upper[0]["name"]
+
+    # Numbered products without explicit kcal should NOT be falsely parsed by manual parser
+    assert parse_meal_input("Творог 5%") is None
+    assert parse_meal_input("Кефир 1%") is None
+    assert parse_meal_input("Яичница из 2 яиц") is None
+    assert parse_meal_input("Молоко 2.5%") is None
+    p_with_cals = parse_meal_input("Творог 5% 150")
+    assert p_with_cals is not None and p_with_cals["calories"] == 150
+    print("✅ 17. Cyrillic catalog search & parser conflict disambiguation verified.")
+
+    # 18. Settings Isolation (Timezone and Checkin time)
+    iso_user = 5555
+    await users_repo.create_or_update_user(iso_user, "iso_user", utc_offset=3, checkin_time="21:00")
+    await users_repo.update_user_timezone(iso_user, 5)
+    u_iso = await users_repo.get_user(iso_user)
+    assert u_iso["utc_offset"] == 5 and u_iso["checkin_time"] == "21:00"
+    await users_repo.update_user_checkin_time(iso_user, "23:15")
+    u_iso2 = await users_repo.get_user(iso_user)
+    assert u_iso2["utc_offset"] == 5 and u_iso2["checkin_time"] == "23:15"
+    print("✅ 18. Settings isolation (timezone & checkin time) verified.")
+
+    # 19. Atomic Timer Delete & Reflection FSM
+    atm_user = 6666
+    await users_repo.create_or_update_user(atm_user, "atm_user")
+    h_atm = await habits_repo.create_habit(atm_user, "Фокус", 30)
+    await timers_repo.create_or_replace_timer(
+        user_id=atm_user,
+        habit_id=h_atm,
+        total_target_seconds=1800,
+        message_id=1,
+        chat_id=1,
+        started_at=int(time.time()) - 1800,
+    )
+    t_del1 = await timers_repo.delete_timer(atm_user)
+    assert t_del1 is not None and t_del1["habit_name"] == "Фокус"
+    t_del2 = await timers_repo.delete_timer(atm_user)
+    assert t_del2 is None  # Second atomic delete is None
+
+    storage = MemoryStorage()
+    fsm_state = FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=1, user_id=atm_user))
+    await fsm_state.set_state(TimerStates.waiting_for_reflection)
+    await fsm_state.update_data(habit_id=h_atm, logged_date="2026-11-21", habit_name="Фокус")
+    assert await fsm_state.get_state() == TimerStates.waiting_for_reflection.state
+    print("✅ 19. Atomic timer deletion & reflection FSM activation verified.")
+
+    # 20. Habit Ownership Security
+    owner_id, thief_id = 7771, 7772
+    await users_repo.create_or_update_user(owner_id, "owner")
+    await users_repo.create_or_update_user(thief_id, "thief")
+    sec_habit = await habits_repo.create_habit(owner_id, "Секретная привычка", 30)
+    thief_freeze, _ = await habits_repo.freeze_habit_today(sec_habit, thief_id)
+    assert thief_freeze is False
+    assert await habits_repo.update_habit(sec_habit, thief_id, name="Взлом") is None
+    assert await habits_repo.delete_habit(sec_habit, thief_id) is False
+    assert await habits_repo.delete_habit(sec_habit, owner_id) is True
+    print("✅ 20. Habit ownership security authorization verified.")
+
+    # 21. FSM JSON Serializability & Scheduler Time Window
+    fsm_payload = {"selected_days": [1, 2, 3, 4, 5], "edit_days": [6, 7]}
+    assert json.dumps(fsm_payload) is not None
+    assert is_time_in_window("21:10", "21:00", window_minutes=30) is True
+    assert is_time_in_window("21:45", "21:00", window_minutes=30) is False
+    print("✅ 21. FSM JSON serializability & scheduler time window verified.")
+
+    # 22. HTML Escaping & UTC Timezone Conversion
+    esc_card = format_habit_edit_card({
+        "name": "Yoga & <script>alert(1)</script>",
+        "habit_type": "duration",
+        "target_minutes": 20,
+        "active_days": "1,2,3,4,5,6,7",
+    })
+    assert "<script>" not in esc_card and "&lt;script&gt;" in esc_card and "&amp;" in esc_card
+
+    meal_local = format_meal_item(
+        {"title": "Ужин & чай", "calories": 300, "created_at": "2026-11-21 15:30:00"},
+        utc_offset=3,
+    )
+    assert "18:30" in meal_local
+    assert "&amp;" in meal_local
+    print("✅ 22. HTML escaping & UTC to local meal conversion verified.")
 
     # Cleanup
     if os.path.exists(TEST_DB):

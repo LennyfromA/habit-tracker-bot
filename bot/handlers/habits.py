@@ -1,14 +1,20 @@
 """Handler for managing habits: list, interactive & quick creation, deletion, streak freezes."""
 
+import html
+import logging
 import re
 from typing import Any, Dict, List, Optional, Set
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.database import habits_repo, users_repo
+from bot.handlers.checkin import render_checkin_view
+from bot.handlers.stats import render_stats_view
+from bot.handlers.timer import render_timer_view
 from bot.keyboards.inline import (
     DAY_LABELS,
     get_checklist_reminders_keyboard,
@@ -24,19 +30,12 @@ from bot.keyboards.inline import (
     get_habits_hub_keyboard,
 )
 from bot.keyboards.reply import get_main_reply_keyboard
+from bot.services.widget_launcher import is_widget_enabled, send_widget_card
 from bot.states.habit_states import HabitCreationStates, HabitEditStates
+from bot.utils.formatting import render_progress_bar
 
+logger = logging.getLogger(__name__)
 router = Router(name="habits_router")
-
-
-def render_progress_bar(spent: int, target: int, length: int = 8) -> str:
-    """Format visual progress bar like [■■■■□□□□]."""
-    if target <= 0:
-        return "[" + "■" * length + "]"
-    ratio = min(1.0, max(0.0, spent / target))
-    filled = round(ratio * length)
-    empty = length - filled
-    return f"[{'■' * filled}{'□' * empty}]"
 
 
 def parse_days_argument(days_arg: str) -> str:
@@ -64,16 +63,14 @@ def parse_days_argument(days_arg: str) -> str:
 # Habit Listing
 # ---------------------------------------------------------
 
-@router.message(F.text.in_(["📋 Привычки", "📋 Мои привычки"]))
-@router.message(Command("habits"))
-async def cmd_habits_list(
-    message: Message,
+async def render_habits_list_view(
+    target_message: Message,
+    user_id: int,
     user_data: Optional[Dict[str, Any]],
     local_date: str,
     local_weekday: int,
 ) -> None:
-    """Display active habits for today with visual progress bars and action buttons."""
-    user_id = message.from_user.id
+    """Display active habits for today with visual progress bars and action buttons using explicit user_id."""
     habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
 
     user = user_data or await users_repo.get_user(user_id)
@@ -82,30 +79,27 @@ async def cmd_habits_list(
     if not habits:
         all_habits = await habits_repo.get_habits_for_user(user_id)
         if not all_habits:
-            await message.answer(
+            await target_message.answer(
                 "📋 У вас пока нет созданных привычек.\n\n"
-                "Нажмите «➕ Новая привычка» ниже или отправьте `/new <Название> <Минуты>`, чтобы добавить первую!",
+                "Нажмите «➕ Новая привычка» ниже или отправьте <code>/new &lt;Название&gt; &lt;Минуты&gt;</code>, чтобы добавить первую!",
                 reply_markup=get_habits_hub_keyboard(),
-                parse_mode="Markdown",
             )
         else:
-            await message.answer(
-                f"🌴 На сегодня ({DAY_LABELS.get(local_weekday, '')}, {local_date}) запланированных привычек нет!\n\n"
-                f"Всего у вас создано привычек: {len(all_habits)}. Чтобы посмотреть все: `/habits_all`.",
+            await target_message.answer(
+                f"🌴 На сегодня ({DAY_LABELS.get(local_weekday, '')}, <code>{local_date}</code>) запланированных привычек нет!\n\n"
+                f"Всего у вас создано привычек: {len(all_habits)}. Чтобы посмотреть все: <code>/habits_all</code>.",
                 reply_markup=get_habits_hub_keyboard(),
-                parse_mode="Markdown",
             )
         return
 
-    await message.answer(
-        f"📋 **Ваши привычки на сегодня ({DAY_LABELS.get(local_weekday, '')}, {local_date}):**\n"
-        f"❄️ Доступно заморозок стрика на этой неделе: **{freezes_left}**",
-        parse_mode="Markdown",
+    await target_message.answer(
+        f"📋 <b>Ваши привычки на сегодня ({DAY_LABELS.get(local_weekday, '')}, {local_date}):</b>\n"
+        f"❄️ Доступно заморозок стрика на этой неделе: <b>{freezes_left}</b>",
     )
 
     for h in habits:
         habit_id = h["id"]
-        name = h["name"]
+        name = html.escape(h["name"])
         target = h["target_minutes"]
         spent = h.get("spent_minutes", 0)
         streak = h.get("streak_days", 0)
@@ -133,7 +127,7 @@ async def cmd_habits_list(
             else:
                 status_text = f"{bar} {spent}/{target} мин (Осталось {remaining} мин) | 🔥 Стрик: {streak} дн."
 
-        card_text = f"🎯 **{name}**\n{status_text}"
+        card_text = f"🎯 <b>{name}</b>\n{status_text}"
         kb = get_habit_actions_keyboard(
             habit_id=habit_id,
             remaining_minutes=remaining if habit_type != "checklist" else 0,
@@ -144,12 +138,44 @@ async def cmd_habits_list(
             completed_repeats=completed_repeats,
             target_repeats=target_repeats,
         )
-        await message.answer(card_text, reply_markup=kb, parse_mode="Markdown")
+        await target_message.answer(card_text, reply_markup=kb)
 
-    await message.answer(
-        "⚡ **Действия с привычками и фокусом:**",
+    await target_message.answer(
+        "⚡ <b>Действия с привычками и фокусом:</b>",
         reply_markup=get_habits_hub_keyboard(),
-        parse_mode="Markdown",
+    )
+
+
+@router.message(F.text.in_(["📋 Привычки", "📋 Мои привычки"]))
+@router.message(Command("habits"))
+async def cmd_habits_list(
+    message: Message,
+    user_data: Optional[Dict[str, Any]],
+    local_date: str,
+    local_weekday: int,
+) -> None:
+    """Display active habits for today."""
+    if is_widget_enabled():
+        user = user_data or await users_repo.get_user(message.from_user.id)
+        offset = user.get("utc_offset", 3) if user else 3
+        await send_widget_card(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            view="habits",
+            local_date=local_date,
+            local_weekday=local_weekday,
+            utc_offset=offset,
+            reply_markup=get_main_reply_keyboard(),
+        )
+        return
+
+    await render_habits_list_view(
+        target_message=message,
+        user_id=message.from_user.id,
+        user_data=user_data,
+        local_date=local_date,
+        local_weekday=local_weekday,
     )
 
 
@@ -159,50 +185,33 @@ async def cmd_habits_all(message: Message, local_date: str) -> None:
     user_id = message.from_user.id
     habits = await habits_repo.get_all_habits_with_today_status(user_id, local_date)
     if not habits:
-        await message.answer("У вас пока нет созданных привычек. Создайте через команду `/new`.", parse_mode="Markdown")
+        await message.answer("У вас пока нет созданных привычек. Создайте через команду <code>/new</code>.")
         return
 
-    text_lines = ["📋 **Все ваши привычки:**\n"]
+    text_lines = ["📋 <b>Все ваши привычки:</b>\n"]
     for h in habits:
         days = ",".join(DAY_LABELS.get(int(d), d) for d in h["active_days"].split(","))
         htype = h.get("habit_type", "duration")
+        name = html.escape(h["name"])
         if htype == "checklist":
             reps = h.get("target_repeats", 1)
-            rem = f" | ⏰ {h['reminder_times']}" if h.get("reminder_times") else ""
+            rem = f" | ⏰ {html.escape(h['reminder_times'])}" if h.get("reminder_times") else ""
             text_lines.append(
-                f"• **{h['name']}** — чек-лист ({reps} раз(а)/день{rem})\n"
+                f"• <b>{name}</b> — чек-лист ({reps} раз(а)/день{rem})\n"
                 f"  Дни: {days} | 🔥 Стрик: {h['streak_days']} дн."
             )
         else:
             text_lines.append(
-                f"• **{h['name']}** — цель {h['target_minutes']} мин/день\n"
+                f"• <b>{name}</b> — цель {h['target_minutes']} мин/день\n"
                 f"  Дни: {days} | 🔥 Стрик: {h['streak_days']} дн."
             )
 
-    await message.answer("\n\n".join(text_lines), parse_mode="Markdown")
+    await message.answer("\n\n".join(text_lines))
 
 
 # ---------------------------------------------------------
 # Habit Creation (FSM & Quick Syntax)
 # ---------------------------------------------------------
-
-@router.message(Command("cancel"))
-@router.message(F.text.casefold().in_(["/отмена", "отмена", "cancel", "/cancel"]))
-async def cmd_cancel_habits(message: Message, state: FSMContext) -> None:
-    """Cancel habit creation or editing."""
-    current_state = await state.get_state()
-    await state.clear()
-    if current_state:
-        await message.answer(
-            "❌ Действие отменено.",
-            reply_markup=get_main_reply_keyboard(),
-        )
-    else:
-        await message.answer(
-            "ℹ️ Нет активного действия для отмены.",
-            reply_markup=get_main_reply_keyboard(),
-        )
-
 
 @router.message(Command("new"))
 async def cmd_new_habit(message: Message, state: FSMContext) -> None:
@@ -232,29 +241,28 @@ async def cmd_new_habit(message: Message, state: FSMContext) -> None:
             target_min = None
 
         if target_min and target_min > 0 and name:
-            habit_id = await habits_repo.create_habit(
+            await habits_repo.create_habit(
                 user_id=message.from_user.id,
                 name=name,
                 target_minutes=target_min,
                 active_days=active_days,
             )
             days_str = ",".join(DAY_LABELS.get(int(d), d) for d in active_days.split(","))
+            esc_name = html.escape(name)
             await message.answer(
-                f"✅ **Привычка успешно создана!**\n\n"
-                f"🎯 Название: **{name}**\n"
-                f"⏱ Цель: **{target_min} мин** в день\n"
-                f"📅 Активные дни: **{days_str}**",
+                f"✅ <b>Привычка успешно создана!</b>\n\n"
+                f"🎯 Название: <b>{esc_name}</b>\n"
+                f"⏱ Цель: <b>{target_min} мин</b> в день\n"
+                f"📅 Активные дни: <b>{days_str}</b>",
                 reply_markup=get_main_reply_keyboard(),
-                parse_mode="Markdown",
             )
             return
 
     # Fallback to interactive FSM
     await state.set_state(HabitCreationStates.waiting_for_name)
     await message.answer(
-        "📝 **Создание новой привычки**\n\n"
-        "Шаг 1 из 3: Введите название привычки (например: `Чтение`, `Английский`, `Спорт`):",
-        parse_mode="Markdown",
+        "📝 <b>Создание новой привычки</b>\n\n"
+        "Шаг 1 из 3: Введите название привычки (например: <code>Чтение</code>, <code>Английский</code>, <code>Спорт</code>):",
     )
 
 
@@ -263,9 +271,8 @@ async def btn_new_habit(message: Message, state: FSMContext) -> None:
     """Interactive FSM creation triggered from reply menu."""
     await state.set_state(HabitCreationStates.waiting_for_name)
     await message.answer(
-        "📝 **Создание новой привычки**\n\n"
-        "Шаг 1 из 3: Введите название привычки (например: `Чтение`, `Английский`, `Спорт`):",
-        parse_mode="Markdown",
+        "📝 <b>Создание новой привычки</b>\n\n"
+        "Шаг 1 из 3: Введите название привычки (например: <code>Чтение</code>, <code>Английский</code>, <code>Спорт</code>):",
     )
 
 
@@ -281,13 +288,13 @@ async def fsm_habit_name(message: Message, state: FSMContext) -> None:
 
     await state.update_data(habit_name=name)
     await state.set_state(HabitCreationStates.waiting_for_type)
+    esc_name = html.escape(name)
     await message.answer(
-        f"Отлично, «**{name}**»!\n\n"
+        f"Отлично, «<b>{esc_name}</b>»!\n\n"
         "Шаг 2 из 3: Выберите тип привычки:\n\n"
-        "• ⏱ **На время (таймер)** — засекать минуты и таймер фокуса (спорт, чтение, работа).\n"
-        "• ✅ **Чек-лист (галочка)** — без таймера, регулярные действия (таблетки, уход, чистка зубов).",
+        "• ⏱ <b>На время (таймер)</b> — засекать минуты и таймер фокуса (спорт, чтение, работа).\n"
+        "• ✅ <b>Чек-лист (галочка)</b> — без таймера, регулярные действия (таблетки, уход, чистка зубов).",
         reply_markup=get_habit_type_keyboard(),
-        parse_mode="Markdown",
     )
 
 
@@ -301,18 +308,16 @@ async def cb_set_habit_type(callback: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(target_minutes=0)
         await state.set_state(HabitCreationStates.waiting_for_repeats)
         await callback.message.edit_text(
-            "📋 **Чек-лист привычка**\n\n"
+            "📋 <b>Чек-лист привычка</b>\n\n"
             "Сколько раз в день нужно выполнять это действие?",
             reply_markup=get_checklist_repeats_keyboard(),
-            parse_mode="Markdown",
         )
     else:
         await state.update_data(target_repeats=1, reminder_times=None)
         await state.set_state(HabitCreationStates.waiting_for_target_minutes)
         await callback.message.edit_text(
-            "⏱ **Привычка с таймером**\n\n"
-            "Укажите ежедневную цель в минутах (например: `25`, `45`, `60`):",
-            parse_mode="Markdown",
+            "⏱ <b>Привычка с таймером</b>\n\n"
+            "Укажите ежедневную цель в минутах (например: <code>25</code>, <code>45</code>, <code>60</code>):",
         )
     await callback.answer()
 
@@ -324,19 +329,18 @@ async def cb_set_habit_repeats(callback: CallbackQuery, state: FSMContext) -> No
     if val == "custom":
         await callback.message.edit_text(
             "✍️ Введите количество повторений в день числом (от 1 до 20):\n\n"
-            "_(Отправьте /cancel для отмены)_",
-            parse_mode="Markdown",
+            "<i>(Отправьте /cancel для отмены)</i>",
         )
+        await callback.answer()
         return
 
     repeats = int(val)
     await state.update_data(target_repeats=repeats)
     await state.set_state(HabitCreationStates.waiting_for_reminder_time)
     await callback.message.edit_text(
-        f"🎯 Цель: **{repeats} раз(а) в день**.\n\n"
+        f"🎯 Цель: <b>{repeats} раз(а) в день</b>.\n\n"
         "Хотите настроить время напоминаний? (Необязательно):",
         reply_markup=get_checklist_reminders_keyboard(repeats=repeats),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -355,10 +359,9 @@ async def fsm_custom_habit_repeats(message: Message, state: FSMContext) -> None:
     await state.update_data(target_repeats=repeats)
     await state.set_state(HabitCreationStates.waiting_for_reminder_time)
     await message.answer(
-        f"🎯 Цель: **{repeats} раз(а) в день**.\n\n"
+        f"🎯 Цель: <b>{repeats} раз(а) в день</b>.\n\n"
         "Хотите настроить время напоминаний? (Необязательно):",
         reply_markup=get_checklist_reminders_keyboard(repeats=repeats),
-        parse_mode="Markdown",
     )
 
 
@@ -368,25 +371,24 @@ async def cb_set_habit_reminder(callback: CallbackQuery, state: FSMContext) -> N
     rem_val = callback.data.split(":", 1)[1]
     if rem_val == "custom":
         await callback.message.edit_text(
-            "✍️ Введите время напоминания (например: `09:00` или через запятую `09:00, 21:00`):\n\n"
-            "_(Отправьте /cancel для отмены)_",
-            parse_mode="Markdown",
+            "✍️ Введите время напоминания (например: <code>09:00</code> или через запятую <code>09:00, 21:00</code>):\n\n"
+            "<i>(Отправьте /cancel для отмены)</i>",
         )
+        await callback.answer()
         return
 
     reminder_times = None if rem_val == "none" else rem_val
     await state.update_data(reminder_times=reminder_times)
 
     selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
-    await state.update_data(selected_days=list(selected_days))
+    await state.update_data(selected_days=sorted(list(selected_days)))
     await state.set_state(HabitCreationStates.waiting_for_active_days)
 
-    rem_note = f"⏰ Напоминания: **{reminder_times}**\n\n" if reminder_times else "🔕 Без напоминаний\n\n"
+    rem_note = f"⏰ Напоминания: <b>{html.escape(reminder_times)}</b>\n\n" if reminder_times else "🔕 Без напоминаний\n\n"
     await callback.message.edit_text(
         f"{rem_note}"
         "Шаг 3 из 3: Выберите дни недели, в которые привычка должна быть активна:",
         reply_markup=get_days_selector_keyboard(selected_days),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -401,7 +403,7 @@ async def fsm_custom_habit_reminder(message: Message, state: FSMContext) -> None
     matches = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw_text)
     if not matches:
         await message.answer(
-            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например `09:00` или `09:00, 21:00`) или /cancel:"
+            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например <code>09:00</code> или <code>09:00, 21:00</code>) или /cancel:"
         )
         return
 
@@ -410,14 +412,13 @@ async def fsm_custom_habit_reminder(message: Message, state: FSMContext) -> None
     await state.update_data(reminder_times=reminder_times)
 
     selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
-    await state.update_data(selected_days=list(selected_days))
+    await state.update_data(selected_days=sorted(list(selected_days)))
     await state.set_state(HabitCreationStates.waiting_for_active_days)
 
     await message.answer(
-        f"⏰ Напоминания установлены: **{reminder_times}**\n\n"
+        f"⏰ Напоминания установлены: <b>{reminder_times}</b>\n\n"
         "Шаг 3 из 3: Выберите дни недели, в которые привычка должна быть активна:",
         reply_markup=get_days_selector_keyboard(selected_days),
-        parse_mode="Markdown",
     )
 
 
@@ -433,23 +434,22 @@ async def fsm_habit_target(message: Message, state: FSMContext) -> None:
 
     target_min = int(text)
     selected_days: Set[int] = {1, 2, 3, 4, 5, 6, 7}
-    await state.update_data(target_minutes=target_min, selected_days=list(selected_days))
+    await state.update_data(target_minutes=target_min, selected_days=sorted(list(selected_days)))
     await state.set_state(HabitCreationStates.waiting_for_active_days)
 
     await message.answer(
-        f"🎯 Цель: **{target_min} минут** в день.\n\n"
+        f"Цель: <b>{target_min} минут</b> в день.\n\n"
         "Шаг 3 из 3: Выберите дни недели, в которые привычка должна быть активна:",
         reply_markup=get_days_selector_keyboard(selected_days),
-        parse_mode="Markdown",
     )
 
 
 @router.callback_query(HabitCreationStates.waiting_for_active_days, F.data.startswith("toggle_day:"))
 async def cb_toggle_day(callback: CallbackQuery, state: FSMContext) -> None:
-    """Toggle individual day on/off."""
+    """Toggle a day of the week in active days selection."""
     day = int(callback.data.split(":")[1])
     data = await state.get_data()
-    selected_days: Set[int] = set(data.get("selected_days", []))
+    selected_days: Set[int] = set(data.get("selected_days") or [1, 2, 3, 4, 5, 6, 7])
 
     if day in selected_days:
         if len(selected_days) > 1:
@@ -460,8 +460,11 @@ async def cb_toggle_day(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         selected_days.add(day)
 
-    await state.update_data(selected_days=list(selected_days))
-    await callback.message.edit_reply_markup(reply_markup=get_days_selector_keyboard(selected_days))
+    await state.update_data(selected_days=sorted(list(selected_days)))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=get_days_selector_keyboard(selected_days))
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit reply markup in cb_toggle_day: %s", e)
     await callback.answer()
 
 
@@ -478,8 +481,11 @@ async def cb_preset_days(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         selected_days = {1, 2, 3, 4, 5, 6, 7}
 
-    await state.update_data(selected_days=list(selected_days))
-    await callback.message.edit_reply_markup(reply_markup=get_days_selector_keyboard(selected_days))
+    await state.update_data(selected_days=sorted(list(selected_days)))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=get_days_selector_keyboard(selected_days))
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit reply markup in cb_preset_days: %s", e)
     await callback.answer()
 
 
@@ -507,23 +513,27 @@ async def cb_finish_habit_creation(callback: CallbackQuery, state: FSMContext) -
     await state.clear()
 
     days_str = ", ".join(DAY_LABELS.get(d, str(d)) for d in selected_days)
+    esc_name = html.escape(name)
     if habit_type == "checklist":
-        rem_str = f"⏰ Напоминания: **{reminder_times}**\n" if reminder_times else "🔕 Без напоминаний\n"
+        rem_str = f"⏰ Напоминания: <b>{html.escape(reminder_times)}</b>\n" if reminder_times else "🔕 Без напоминаний\n"
         details_str = (
-            f"📋 Тип: **Чек-лист (повторения)**\n"
-            f"🔢 Цель: **{target_repeats} раз(а)** в день\n"
+            f"📋 Тип: <b>Чек-лист (повторения)</b>\n"
+            f"🔢 Цель: <b>{target_repeats} раз(а)</b> в день\n"
             f"{rem_str}"
         )
     else:
-        details_str = f"⏱ Цель: **{target_min} мин** в день\n"
+        details_str = f"⏱ Цель: <b>{target_min} мин</b> в день\n"
 
-    await callback.message.edit_text(
-        f"🎉 **Привычка успешно создана!**\n\n"
-        f"🎯 Название: **{name}**\n"
-        f"{details_str}"
-        f"📅 Активные дни: **{days_str}**",
-        parse_mode="Markdown",
-    )
+    try:
+        await callback.message.edit_text(
+            f"🎉 <b>Привычка успешно создана!</b>\n\n"
+            f"🎯 Название: <b>{esc_name}</b>\n"
+            f"{details_str}"
+            f"📅 Активные дни: <b>{days_str}</b>",
+        )
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_finish_habit_creation: %s", e)
+
     await callback.message.answer(
         "Вы можете отметить выполнение в меню «📋 Мои привычки»!",
         reply_markup=get_main_reply_keyboard(),
@@ -567,7 +577,8 @@ async def cb_habit_check(
     user = await users_repo.get_user(user_id)
     freezes_left = user.get("freezes_left", 0) if user else 0
 
-    card_text = f"🎯 **{habit['name']}**\n{status_text}"
+    esc_name = html.escape(habit["name"])
+    card_text = f"🎯 <b>{esc_name}</b>\n{status_text}"
     kb = get_habit_actions_keyboard(
         habit_id=habit_id,
         remaining_minutes=0,
@@ -580,9 +591,9 @@ async def cb_habit_check(
     )
 
     try:
-        await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="Markdown")
-    except Exception:
-        pass
+        await callback.message.edit_text(card_text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_habit_check: %s", e)
     await callback.answer(toast)
 
 
@@ -602,8 +613,8 @@ async def cb_remind_check(
     user_id = callback.from_user.id
 
     habit = await habits_repo.get_habit_by_id(habit_id)
-    if not habit:
-        await callback.answer("Привычка не найдена.")
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
         return
 
     cur_reps, tgt_reps, is_completed = await habits_repo.increment_habit_repeat(
@@ -612,16 +623,16 @@ async def cb_remind_check(
         logged_date=local_date,
     )
 
+    esc_name = html.escape(habit["name"])
     compl_msg = "Цель на сегодня достигнута! 🎉" if is_completed else f"Прогресс: {cur_reps}/{tgt_reps}"
     try:
         await callback.message.edit_text(
-            f"✅ **«{habit['name']}» отмечено!**\n\n"
+            f"✅ <b>«{esc_name}» отмечено!</b>\n\n"
             f"📊 {compl_msg}\n"
             f"🔥 Стрик: {habit['streak_days']} дн. Так держать!",
-            parse_mode="Markdown",
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_remind_check: %s", e)
     await callback.answer("Отмечено! (+1)")
 
 
@@ -632,18 +643,21 @@ async def cb_remind_snooze(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
 
     habit = await habits_repo.get_habit_by_id(habit_id)
-    name = habit["name"] if habit else "Привычка"
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
 
+    name = habit["name"]
     await habits_repo.add_habit_snooze(habit_id, user_id, snooze_seconds=900)
 
+    esc_name = html.escape(name)
     try:
         await callback.message.edit_text(
-            f"⏰ **Напоминание по «{name}» отложено на 15 минут.**\n\n"
+            f"⏰ <b>Напоминание по «{esc_name}» отложено на 15 минут.</b>\n\n"
             "Бот пришлет повторное уведомление.",
-            parse_mode="Markdown",
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_remind_snooze: %s", e)
     await callback.answer("Отложено на 15 минут.")
 
 
@@ -663,11 +677,11 @@ async def cb_freeze_habit(callback: CallbackQuery) -> None:
         # Update button to frozen state
         try:
             await callback.message.edit_text(
-                f"{callback.message.text}\n\n*(Заморозка активирована!)*",
+                f"{callback.message.text}\n\n<i>(Заморозка активирована!)</i>",
                 reply_markup=None,
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug("Failed to edit text in cb_freeze_habit: %s", e)
 
 
 @router.callback_query(F.data == "already_frozen")
@@ -689,13 +703,14 @@ async def cb_delete_habit(callback: CallbackQuery) -> None:
 
     await habits_repo.delete_habit(habit_id, user_id)
     await callback.answer("Привычка удалена.", show_alert=True)
+    esc_name = html.escape(habit["name"])
     try:
         await callback.message.edit_text(
-            f"❌ Привычка «{habit['name']}» была удалена.",
+            f"❌ Привычка «{esc_name}» была удалена.",
             reply_markup=None,
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_delete_habit: %s", e)
 
 
 # ---------------------------------------------------------
@@ -707,18 +722,16 @@ async def cb_habits_hub_new(callback: CallbackQuery, state: FSMContext) -> None:
     """Launch interactive habit creation wizard."""
     await state.set_state(HabitCreationStates.waiting_for_name)
     await callback.message.answer(
-        "📝 **Шаг 1 из 3:** Введите название новой привычки (например: «Чтение книг» или «Медитация»):\n"
-        "_(Отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        "📝 <b>Шаг 1 из 3:</b> Введите название новой привычки (например: «Чтение книг» или «Медитация»):\n"
+        "<i>(Отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "habits_hub:timer")
 async def cb_habits_hub_timer(callback: CallbackQuery) -> None:
-    """Redirect to focus timer."""
-    from bot.handlers.timer import cmd_active_timer
-    await cmd_active_timer(callback.message)
+    """Redirect to focus timer using explicit callback.from_user.id."""
+    await render_timer_view(callback.message, callback.from_user.id)
     await callback.answer()
 
 
@@ -728,17 +741,15 @@ async def cb_habits_hub_checkin(
     local_date: str,
     local_weekday: int,
 ) -> None:
-    """Redirect to evening checkin."""
-    from bot.handlers.checkin import cmd_checkin
-    await cmd_checkin(callback.message, local_date=local_date, local_weekday=local_weekday)
+    """Redirect to evening checkin using explicit callback.from_user.id."""
+    await render_checkin_view(callback.message, callback.from_user.id, local_date, local_weekday)
     await callback.answer()
 
 
 @router.callback_query(F.data == "habits_hub:stats")
 async def cb_habits_hub_stats(callback: CallbackQuery, local_date: str) -> None:
-    """Redirect to statistics and charts."""
-    from bot.handlers.stats import cmd_stats
-    await cmd_stats(callback.message, local_date=local_date)
+    """Redirect to statistics and charts using explicit callback.from_user.id."""
+    await render_stats_view(callback.message, callback.from_user.id, local_date)
     await callback.answer()
 
 
@@ -747,8 +758,8 @@ async def cb_habits_hub_stats(callback: CallbackQuery, local_date: str) -> None:
 # ---------------------------------------------------------
 
 def format_habit_edit_card(habit: Dict[str, Any]) -> str:
-    """Format markdown summary of habit settings for the edit dashboard."""
-    name = habit["name"]
+    """Format HTML summary of habit settings for the edit dashboard."""
+    name = html.escape(habit["name"])
     htype = habit.get("habit_type", "duration")
     active_days_raw = str(habit.get("active_days") or "1,2,3,4,5,6,7")
     days_labels = ", ".join(DAY_LABELS.get(int(d), str(d)) for d in active_days_raw.split(",") if d.isdigit())
@@ -763,18 +774,18 @@ def format_habit_edit_card(habit: Dict[str, Any]) -> str:
 
     if htype == "checklist":
         reps = habit.get("target_repeats", 1) or 1
-        rem = habit.get("reminder_times") or "Без напоминаний"
-        type_str = f"📋 **Тип:** Чек-лист (повторения)\n🎯 **Цель:** {reps} раз(а) в день\n⏰ **Напоминания:** {rem}"
+        rem = html.escape(habit.get("reminder_times") or "Без напоминаний")
+        type_str = f"📋 <b>Тип:</b> Чек-лист (повторения)\n🎯 <b>Цель:</b> {reps} раз(а) в день\n⏰ <b>Напоминания:</b> {rem}"
     else:
         target = habit["target_minutes"]
-        type_str = f"⏱ **Тип:** С таймером\n🎯 **Цель:** {target} мин/день"
+        type_str = f"⏱ <b>Тип:</b> С таймером\n🎯 <b>Цель:</b> {target} мин/день"
 
     return (
-        f"✏️ **Редактирование привычки «{name}»**\n\n"
-        f"🎯 **Название:** {name}\n"
+        f"✏️ <b>Редактирование привычки «{name}»</b>\n\n"
+        f"🎯 <b>Название:</b> {name}\n"
         f"{type_str}\n"
-        f"📅 **Дни активности / чек-ина:** {days_str}\n"
-        f"🔥 **Текущий стрик:** {habit.get('streak_days', 0)} дн.\n\n"
+        f"📅 <b>Дни активности / чек-ина:</b> {days_str}\n"
+        f"🔥 <b>Текущий стрик:</b> {habit.get('streak_days', 0)} дн.\n\n"
         f"Выберите, что вы хотите изменить:"
     )
 
@@ -795,10 +806,9 @@ async def cb_edit_habit_menu(callback: CallbackQuery, state: FSMContext) -> None
         await callback.message.edit_text(
             text,
             reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=habit.get("habit_type", "duration")),
-            parse_mode="Markdown",
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit text in cb_edit_habit_menu: %s", e)
     await callback.answer()
 
 
@@ -806,12 +816,17 @@ async def cb_edit_habit_menu(callback: CallbackQuery, state: FSMContext) -> None
 async def cb_edit_h_name(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user for new habit name."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
     await state.set_state(HabitEditStates.waiting_for_name)
     await state.update_data(editing_habit_id=habit_id)
     await callback.message.edit_text(
-        "📝 **Введите новое название для этой привычки:**\n\n"
-        "_(Отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        "📝 <b>Введите новое название для этой привычки:</b>\n\n"
+        "<i>(Отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
@@ -837,10 +852,10 @@ async def process_edit_habit_name(message: Message, state: FSMContext) -> None:
         return
 
     text = format_habit_edit_card(updated)
+    esc_name = html.escape(new_name)
     await message.answer(
-        f"✅ Название успешно изменено на «**{new_name}**»!\n\n" + text,
+        f"✅ Название успешно изменено на «<b>{esc_name}</b>»!\n\n" + text,
         reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
-        parse_mode="Markdown",
     )
 
 
@@ -848,15 +863,19 @@ async def process_edit_habit_name(message: Message, state: FSMContext) -> None:
 async def cb_edit_h_time(callback: CallbackQuery) -> None:
     """Display duration presets for habit target."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
     habit = await habits_repo.get_habit_by_id(habit_id)
-    cur_mins = habit["target_minutes"] if habit else 30
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
+    cur_mins = habit["target_minutes"]
 
     await callback.message.edit_text(
-        f"⏱ **Изменение ежедневной цели по времени**\n\n"
-        f"Текущая цель: **{cur_mins} мин/день**.\n\n"
+        f"⏱ <b>Изменение ежедневной цели по времени</b>\n\n"
+        f"Текущая цель: <b>{cur_mins} мин/день</b>.\n\n"
         f"Выберите готовое значение или введите своё число минут:",
         reply_markup=get_habit_time_presets_keyboard(habit_id),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -878,22 +897,26 @@ async def cb_set_h_time(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
-                parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug("Failed to edit text in cb_set_h_time: %s", e)
 
 
 @router.callback_query(F.data.startswith("custom_h_time:"))
 async def cb_custom_h_time(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type custom minutes."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
     await state.set_state(HabitEditStates.waiting_for_target_minutes)
     await state.update_data(editing_habit_id=habit_id)
     await callback.message.edit_text(
-        "✍️ **Введите желаемое целевое время в минутах (от 1 до 720):**\n\n"
-        "_(Отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        "✍️ <b>Введите желаемое целевое время в минутах (от 1 до 720):</b>\n\n"
+        "<i>(Отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
@@ -906,7 +929,7 @@ async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
         return
     match = re.search(r"\d+", text)
     if not match:
-        await message.answer("⚠️ Введите число минут (например: `45`) или /cancel.")
+        await message.answer("⚠️ Введите число минут (например: <code>45</code>) или /cancel.")
         return
 
     mins = int(match.group(0))
@@ -926,9 +949,8 @@ async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
 
     card_text = format_habit_edit_card(updated)
     await message.answer(
-        f"✅ Цель по времени успешно изменена на **{mins} мин/день**!\n\n" + card_text,
+        f"✅ Цель по времени успешно изменена на <b>{mins} мин/день</b>!\n\n" + card_text,
         reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
-        parse_mode="Markdown",
     )
 
 
@@ -940,11 +962,16 @@ async def process_edit_habit_time(message: Message, state: FSMContext) -> None:
 async def cb_edit_h_reps(callback: CallbackQuery) -> None:
     """Display repeats presets for checklist habit."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
     await callback.message.edit_text(
-        "🎯 **Изменение количества повторений в день:**\n\n"
+        "🎯 <b>Изменение количества повторений в день:</b>\n\n"
         "Выберите готовое значение или укажите своё число:",
         reply_markup=get_edit_checklist_repeats_keyboard(habit_id),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -965,22 +992,26 @@ async def cb_set_edit_reps(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 card_text,
                 reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
-                parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug("Failed to edit text in cb_set_edit_reps: %s", e)
 
 
 @router.callback_query(F.data.startswith("custom_edit_reps:"))
 async def cb_custom_edit_reps(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type custom repeats."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
     await state.set_state(HabitEditStates.waiting_for_repeats)
     await state.update_data(editing_habit_id=habit_id)
     await callback.message.edit_text(
-        "✍️ **Введите желаемое количество повторений в день (от 1 до 20):**\n\n"
-        "_(Отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        "✍️ <b>Введите желаемое количество повторений в день (от 1 до 20):</b>\n\n"
+        "<i>(Отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
@@ -1008,9 +1039,8 @@ async def process_edit_habit_repeats(message: Message, state: FSMContext) -> Non
 
     card_text = format_habit_edit_card(updated)
     await message.answer(
-        f"✅ Количество повторений успешно изменено на **{reps} раз(а)/день**!\n\n" + card_text,
+        f"✅ Количество повторений успешно изменено на <b>{reps} раз(а)/день</b>!\n\n" + card_text,
         reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
-        parse_mode="Markdown",
     )
 
 
@@ -1018,14 +1048,18 @@ async def process_edit_habit_repeats(message: Message, state: FSMContext) -> Non
 async def cb_edit_h_rem(callback: CallbackQuery) -> None:
     """Display reminders presets for checklist habit."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
     habit = await habits_repo.get_habit_by_id(habit_id)
-    reps = habit.get("target_repeats", 1) if habit else 1
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
+    reps = habit.get("target_repeats", 1) or 1
 
     await callback.message.edit_text(
-        "⏰ **Настройка времени напоминаний:**\n\n"
+        "⏰ <b>Настройка времени напоминаний:</b>\n\n"
         "Выберите готовый вариант или введите своё время:",
         reply_markup=get_edit_checklist_reminders_keyboard(habit_id, repeats=reps),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -1048,22 +1082,26 @@ async def cb_set_edit_rem(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 card_text,
                 reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
-                parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug("Failed to edit text in cb_set_edit_rem: %s", e)
 
 
 @router.callback_query(F.data.startswith("custom_edit_rem:"))
 async def cb_custom_edit_rem(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type custom reminder times."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+    habit = await habits_repo.get_habit_by_id(habit_id)
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
+        return
+
     await state.set_state(HabitEditStates.waiting_for_reminder_time)
     await state.update_data(editing_habit_id=habit_id)
     await callback.message.edit_text(
-        "✍️ **Введите время напоминания в формате ЧЧ:ММ (например `09:00` или через запятую `09:00, 21:00`):**\n\n"
-        "_(Отправьте /cancel для отмены)_",
-        parse_mode="Markdown",
+        "✍️ <b>Введите время напоминания в формате ЧЧ:ММ (например <code>09:00</code> или через запятую <code>09:00, 21:00</code>):</b>\n\n"
+        "<i>(Отправьте /cancel для отмены)</i>",
     )
     await callback.answer()
 
@@ -1078,7 +1116,7 @@ async def process_edit_habit_reminder_time(message: Message, state: FSMContext) 
     matches = re.findall(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw_text)
     if not matches:
         await message.answer(
-            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например `09:00` или `09:00, 21:00`) или /cancel:"
+            "⚠️ Пожалуйста, введите корректное время в формате ЧЧ:ММ (например <code>09:00</code> или <code>09:00, 21:00</code>) или /cancel:"
         )
         return
 
@@ -1097,9 +1135,8 @@ async def process_edit_habit_reminder_time(message: Message, state: FSMContext) 
 
     card_text = format_habit_edit_card(updated)
     await message.answer(
-        f"✅ Время напоминаний установлено: **{reminder_times}**!\n\n" + card_text,
+        f"✅ Время напоминаний установлено: <b>{reminder_times}</b>!\n\n" + card_text,
         reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type="checklist"),
-        parse_mode="Markdown",
     )
 
 
@@ -1107,22 +1144,22 @@ async def process_edit_habit_reminder_time(message: Message, state: FSMContext) 
 async def cb_edit_h_days(callback: CallbackQuery, state: FSMContext) -> None:
     """Open day selector keyboard for habit editing."""
     habit_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
     habit = await habits_repo.get_habit_by_id(habit_id)
-    if not habit:
-        await callback.answer("Привычка не найдена.")
+    if not habit or habit["user_id"] != user_id:
+        await callback.answer("Привычка не найдена.", show_alert=True)
         return
 
     days_str = habit.get("active_days", "1,2,3,4,5,6,7")
     selected_days = set(int(d) for d in days_str.split(",") if d.isdigit())
 
     await state.set_state(HabitEditStates.waiting_for_active_days)
-    await state.update_data(editing_habit_id=habit_id, edit_days=selected_days)
+    await state.update_data(editing_habit_id=habit_id, edit_days=sorted(list(selected_days)))
 
     await callback.message.edit_text(
-        "📅 **Выберите дни, в которые привычка должна быть активна:**\n\n"
+        "📅 <b>Выберите дни, в которые привычка должна быть активна:</b>\n\n"
         "В выбранные дни привычка будет отображаться в плане и проверяться в вечернем чек-ине.",
         reply_markup=get_edit_days_selector_keyboard(habit_id, selected_days),
-        parse_mode="Markdown",
     )
     await callback.answer()
 
@@ -1135,19 +1172,20 @@ async def cb_toggle_edit_day(callback: CallbackQuery, state: FSMContext) -> None
     day = int(parts[2])
 
     data = await state.get_data()
-    days: Set[int] = data.get("edit_days", set())
+    days_list = data.get("edit_days") or [1, 2, 3, 4, 5, 6, 7]
+    days: Set[int] = set(days_list)
     if day in days:
         days.remove(day)
     else:
         days.add(day)
 
-    await state.update_data(edit_days=days)
+    await state.update_data(edit_days=sorted(list(days)))
     try:
         await callback.message.edit_reply_markup(
             reply_markup=get_edit_days_selector_keyboard(habit_id, days)
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit reply markup in cb_toggle_edit_day: %s", e)
     await callback.answer()
 
 
@@ -1167,13 +1205,13 @@ async def cb_preset_edit_days(callback: CallbackQuery, state: FSMContext) -> Non
     else:
         days = {1, 2, 3, 4, 5, 6, 7}
 
-    await state.update_data(edit_days=days)
+    await state.update_data(edit_days=sorted(list(days)))
     try:
         await callback.message.edit_reply_markup(
             reply_markup=get_edit_days_selector_keyboard(habit_id, days)
         )
-    except Exception:
-        pass
+    except TelegramBadRequest as e:
+        logger.debug("Failed to edit reply markup in cb_preset_edit_days: %s", e)
     await callback.answer()
 
 
@@ -1182,7 +1220,8 @@ async def cb_save_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
     """Save updated active days to database."""
     habit_id = int(callback.data.split(":")[1])
     data = await state.get_data()
-    days: Set[int] = data.get("edit_days", set())
+    days_list = data.get("edit_days") or []
+    days: Set[int] = set(days_list)
 
     if not days:
         await callback.answer("Выберите хотя бы один активный день!", show_alert=True)
@@ -1201,10 +1240,9 @@ async def cb_save_edit_days(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.message.edit_text(
                 card_text,
                 reply_markup=get_habit_edit_menu_keyboard(habit_id, habit_type=updated.get("habit_type", "duration")),
-                parse_mode="Markdown",
             )
-        except Exception:
-            pass
+        except TelegramBadRequest as e:
+            logger.debug("Failed to edit text in cb_save_edit_days: %s", e)
 
 
 @router.callback_query(F.data == "habits_refresh")
@@ -1215,7 +1253,13 @@ async def cb_habits_refresh(
     local_weekday: int,
     state: FSMContext,
 ) -> None:
-    """Refresh habits list from inline back button."""
+    """Refresh habits list from inline back button using explicit callback.from_user.id."""
     await state.clear()
-    await cmd_habits_list(callback.message, user_data=user_data, local_date=local_date, local_weekday=local_weekday)
+    await render_habits_list_view(
+        target_message=callback.message,
+        user_id=callback.from_user.id,
+        user_data=user_data,
+        local_date=local_date,
+        local_weekday=local_weekday,
+    )
     await callback.answer("Обновлено")

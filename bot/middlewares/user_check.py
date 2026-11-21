@@ -1,18 +1,27 @@
-"""Middleware for user registration verification and timezone injection."""
+"""Middleware for user registration verification, timezone injection, and FSM menu reset."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Set
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.database import users_repo
 
+MAIN_MENU_BUTTONS: Set[str] = {
+    "🍏 Здоровье",
+    "🥗 Питание",
+    "📋 Привычки",
+    "📋 Мои привычки",
+    "⚙️ Настройки",
+}
+
 
 class UserCheckMiddleware(BaseMiddleware):
     """
     Ensures user is registered in the database, injects user record
-    and calculated local datetime metadata into handler parameters.
+    and calculated local datetime metadata into handler parameters,
+    and automatically resets active FSM state when main menu buttons are clicked.
     """
 
     async def __call__(
@@ -29,6 +38,14 @@ class UserCheckMiddleware(BaseMiddleware):
 
         if not from_user or from_user.is_bot:
             return await handler(event, data)
+
+        # Clear FSM if clicking main reply keyboard navigation buttons
+        if isinstance(event, Message) and event.text and event.text.strip() in MAIN_MENU_BUTTONS:
+            state = data.get("state")
+            if state:
+                current_state = await state.get_state()
+                if current_state:
+                    await state.clear()
 
         user_id = from_user.id
         user = await users_repo.get_user(user_id)

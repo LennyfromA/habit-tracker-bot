@@ -53,6 +53,9 @@ htmlcov/
 *.swp
 *.swo
 
+# Project context dumps
+project_context.txt
+
 # OS generated
 .DS_Store
 Thumbs.db

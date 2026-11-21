@@ -81,6 +81,35 @@ async def toggle_track_water(user_id: int) -> bool:
             return bool(row["track_water"]) if row else True
 
 
+async def set_nutrition_tracking_flags(
+    user_id: int,
+    track_bju: Optional[bool] = None,
+    track_water: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Explicitly set tracking flags for BJU and/or water."""
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO nutrition_goals (user_id, target_calories, track_bju, track_water)
+            VALUES (?, 2000, 1, 1)
+            ON CONFLICT(user_id) DO NOTHING;
+            """,
+            (user_id,),
+        )
+        if track_bju is not None:
+            await db.execute(
+                "UPDATE nutrition_goals SET track_bju = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?;",
+                (1 if track_bju else 0, user_id),
+            )
+        if track_water is not None:
+            await db.execute(
+                "UPDATE nutrition_goals SET track_water = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?;",
+                (1 if track_water else 0, user_id),
+            )
+        await db.commit()
+    return await get_nutrition_goals(user_id)
+
+
 async def set_nutrition_goals(
     user_id: int,
     calories: int,

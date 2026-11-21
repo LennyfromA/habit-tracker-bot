@@ -120,17 +120,39 @@ async def add_time_to_timer(
 
 
 async def delete_timer(user_id: int) -> Optional[Dict[str, Any]]:
-    """Delete and return active timer record."""
-    timer = await get_timer(user_id)
-    if not timer:
-        return None
-
+    """Atomically delete and return active timer record."""
     async with get_db() as db:
-        query = "DELETE FROM active_timers WHERE user_id = ?;"
-        await db.execute(query, (user_id,))
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE;")
+        select_query = """
+        SELECT
+            t.user_id,
+            t.habit_id,
+            t.started_at,
+            t.total_target_seconds,
+            t.elapsed_before_pause,
+            t.is_paused,
+            t.message_id,
+            t.chat_id,
+            h.name AS habit_name,
+            h.target_minutes
+        FROM active_timers t
+        JOIN habits h ON h.id = t.habit_id
+        WHERE t.user_id = ?;
+        """
+        async with db.execute(select_query, (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await db.rollback()
+                return None
+            timer = dict(row)
 
-    return timer
+        delete_cursor = await db.execute("DELETE FROM active_timers WHERE user_id = ?;", (user_id,))
+        if delete_cursor.rowcount == 0:
+            await db.rollback()
+            return None
+
+        await db.commit()
+        return timer
 
 
 async def get_all_running_timers() -> List[Dict[str, Any]]:

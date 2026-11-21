@@ -1,5 +1,6 @@
 """Repository for habit definitions, daily progress logs, and streak tracking."""
 
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -177,30 +178,71 @@ async def delete_habit(habit_id: int, user_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-async def freeze_habit_today(habit_id: int, user_id: int) -> Tuple[bool, str]:
+async def freeze_habit_today(
+    habit_id: int,
+    user_id: int,
+    logged_date: Optional[str] = None,
+) -> Tuple[bool, str]:
     """
-    Deduct 1 freeze from user and mark habit as is_frozen_today = 1.
-    Returns (success, message).
+    Atomically deduct 1 freeze from user and mark habit as is_frozen_today = 1
+    in a single BEGIN IMMEDIATE transaction.
+    Verifies ownership, that habit is not already frozen today and not already completed today.
     """
-    habit = await get_habit_by_id(habit_id)
-    if not habit or habit["user_id"] != user_id:
-        return False, "Привычка не найдена."
-
-    if habit["is_frozen_today"]:
-        return False, "Эта привычка уже заморожена на сегодня!"
-
-    deducted = await users_repo.deduct_freeze(user_id)
-    if not deducted:
-        return False, "У вас не осталось заморозок на этой неделе. Они возобновятся в понедельник!"
-
     async with get_db() as db:
-        query = "UPDATE habits SET is_frozen_today = 1 WHERE id = ?;"
-        await db.execute(query, (habit_id,))
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE;")
 
-    user = await users_repo.get_user(user_id)
-    freezes_left = user["freezes_left"] if user else 0
-    return True, f"❄️ Привычка «{habit['name']}» заморожена на сегодня! Стрик в безопасности. Осталось заморозок: {freezes_left}."
+        async with db.execute("SELECT utc_offset, freezes_left FROM users WHERE user_id = ?;", (user_id,)) as cursor:
+            user_row = await cursor.fetchone()
+            if not user_row:
+                await db.rollback()
+                return False, "Пользователь не найден."
+            user_data = dict(user_row)
+
+        target_date = logged_date
+        if not target_date:
+            offset = user_data.get("utc_offset", 3)
+            now_dt = datetime.now(timezone.utc) + timedelta(hours=offset)
+            target_date = now_dt.strftime("%Y-%m-%d")
+
+        async with db.execute(
+            "SELECT id, name, user_id, is_frozen_today FROM habits WHERE id = ?;",
+            (habit_id,),
+        ) as cursor:
+            habit_row = await cursor.fetchone()
+            if not habit_row or habit_row["user_id"] != user_id:
+                await db.rollback()
+                return False, "Привычка не найдена."
+            habit = dict(habit_row)
+
+        if habit["is_frozen_today"]:
+            await db.rollback()
+            return False, "Эта привычка уже заморожена на сегодня!"
+
+        async with db.execute(
+            "SELECT is_completed FROM habit_logs WHERE habit_id = ? AND logged_date = ?;",
+            (habit_id, target_date),
+        ) as cursor:
+            log_row = await cursor.fetchone()
+            if log_row and log_row["is_completed"]:
+                await db.rollback()
+                return False, "Привычка уже выполнена сегодня! Заморозка не требуется."
+
+        deduct_cur = await db.execute(
+            "UPDATE users SET freezes_left = freezes_left - 1 WHERE user_id = ? AND freezes_left > 0;",
+            (user_id,),
+        )
+        if deduct_cur.rowcount == 0:
+            await db.rollback()
+            return False, "У вас не осталось заморозок на этой неделе. Они возобновятся в понедельник!"
+
+        await db.execute("UPDATE habits SET is_frozen_today = 1 WHERE id = ?;", (habit_id,))
+
+        async with db.execute("SELECT freezes_left FROM users WHERE user_id = ?;", (user_id,)) as cursor:
+            u_after = await cursor.fetchone()
+            freezes_left = u_after["freezes_left"] if u_after else 0
+
+        await db.commit()
+        return True, f"❄️ Привычка «{habit['name']}» заморожена на сегодня! Стрик в безопасности. Осталось заморозок: {freezes_left}."
 
 
 async def upsert_habit_log(
@@ -504,3 +546,11 @@ async def midnight_process_streaks_for_user(
                 )
 
         await db.commit()
+
+
+async def cleanup_old_reminders_log(cutoff_date: str) -> None:
+    """Delete habit reminder logs older than cutoff_date."""
+    async with get_db() as db:
+        await db.execute("DELETE FROM habit_reminders_log WHERE reminded_date < ?;", (cutoff_date,))
+        await db.commit()
+

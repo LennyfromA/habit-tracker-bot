@@ -1,20 +1,38 @@
 """Background scheduler using APScheduler for timer checks, evening check-ins, and midnight resets."""
 
+import html
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from aiogram import Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bot.database import habits_repo, timers_repo, users_repo
+from bot.database import habits_repo, nutrition_repo, timers_repo, users_repo, water_repo, widgets_repo
+from bot.handlers.checkin import format_checkin_text
 from bot.keyboards.inline import get_checkin_dashboard_keyboard, get_habit_reminder_push_keyboard
+from bot.services.widget_launcher import is_widget_enabled, send_widget_push, sync_widget_message
+from bot.states.habit_states import TimerStates
 
 logger = logging.getLogger(__name__)
 
 
-async def check_active_timers(bot: Bot) -> None:
+def is_time_in_window(current_hm: str, target_hm: str, window_minutes: int = 30) -> bool:
+    """Return True if current_hm is within [target_hm, target_hm + window_minutes]."""
+    try:
+        cur_h, cur_m = map(int, current_hm.split(":"))
+        tgt_h, tgt_m = map(int, target_hm.split(":"))
+        diff = (cur_h * 60 + cur_m) - (tgt_h * 60 + tgt_m)
+        return 0 <= diff <= window_minutes
+    except Exception:
+        return current_hm == target_hm
+
+
+async def check_active_timers(bot: Bot, storage: Optional[BaseStorage] = None) -> None:
     """Check running focus sessions and complete those whose target duration has elapsed."""
     running_timers = await timers_repo.get_all_running_timers()
     now_ts = int(time.time())
@@ -29,7 +47,11 @@ async def check_active_timers(bot: Bot) -> None:
             habit_name = timer["habit_name"]
             target_minutes = timer["target_minutes"]
 
-            # Calculate actual worked minutes
+            # 1. Atomically delete timer first to prevent race condition with manual stop
+            deleted_timer = await timers_repo.delete_timer(user_id)
+            if not deleted_timer:
+                continue  # Timer was already stopped concurrently
+
             actual_minutes = max(1, round(elapsed / 60))
 
             # Fetch user to get timezone and local date
@@ -38,7 +60,7 @@ async def check_active_timers(bot: Bot) -> None:
             user_local_now = datetime.now(timezone.utc) + timedelta(hours=offset)
             local_date = user_local_now.strftime("%Y-%m-%d")
 
-            # Update habit log
+            # 2. Update habit log
             spent_today, is_completed = await habits_repo.upsert_habit_log(
                 habit_id=habit_id,
                 user_id=user_id,
@@ -47,51 +69,65 @@ async def check_active_timers(bot: Bot) -> None:
                 target_minutes=target_minutes,
             )
 
-            # Remove timer record
-            await timers_repo.delete_timer(user_id)
-
-            # Edit existing timer message
+            # 3. Edit existing timer card message
             remaining = max(0, target_minutes - spent_today)
             completion_note = " 🏆 (Цель на сегодня достигнута!)" if is_completed else f" (Осталось: {remaining} мин)"
 
+            escaped_habit_name = html.escape(habit_name)
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=(
-                        f"✅ **Сессия завершена по таймеру!**\n\n"
-                        f"🎯 Привычка: «{habit_name}»\n"
+                        f"✅ <b>Сессия завершена по таймеру!</b>\n\n"
+                        f"🎯 Привычка: «{escaped_habit_name}»\n"
                         f"⏱ Засчитано: {actual_minutes} мин.\n"
                         f"📊 Сегодня: {spent_today}/{target_minutes} мин.{completion_note}"
                     ),
-                    parse_mode="Markdown",
                 )
             except Exception as e:
                 logger.debug("Could not edit timer message %s: %s", message_id, e)
 
-            # Send sound notification and reflection prompt
+            # Sync widget cards if active
+            if is_widget_enabled():
+                try:
+                    latest_w = await widgets_repo.get_latest_widget_message(user_id)
+                    if latest_w:
+                        await sync_widget_message(bot, user_id, latest_w["wid"], latest_w["view_type"])
+                except Exception as e:
+                    logger.debug("Failed to sync widget message on timer auto-completion: %s", e)
+
+            # 4. Activate FSM state for reflection note
+            if storage:
+                fsm_ctx = FSMContext(
+                    storage=storage,
+                    key=StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id),
+                )
+                await fsm_ctx.set_state(TimerStates.waiting_for_reflection)
+                await fsm_ctx.update_data(habit_id=habit_id, logged_date=local_date, habit_name=habit_name)
+
+            # 5. Send notification and reflection prompt
             try:
                 await bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f"🔔 **Время вышло!** Фокус-сессия по «{habit_name}» успешно завершена!\n\n"
+                        f"🔔 <b>Время вышло!</b> Фокус-сессия по «{escaped_habit_name}» успешно завершена!\n\n"
                         f"⏱ Добавлено: +{actual_minutes} мин.\n\n"
                         f"✍️ Напиши коротко, что успел сделать (или отправь /skip):"
                     ),
                     disable_notification=False,
-                    parse_mode="Markdown",
                 )
             except Exception as e:
                 logger.warning("Failed to send timer alert to user %s: %s", user_id, e)
 
 
 async def check_evening_checkins(bot: Bot) -> None:
-    """Trigger evening review dashboard for users at their configured checkin_time."""
+    """Trigger evening review dashboard for users at their configured checkin_time window."""
     users = await users_repo.get_all_users()
     now_utc = datetime.now(timezone.utc)
+    now_ts = int(time.time())
 
     for user in users:
-        now_ts = int(time.time())
         muted_until = user.get("notifications_muted_until", 0) or 0
         if muted_until > now_ts:
             continue
@@ -103,43 +139,44 @@ async def check_evening_checkins(bot: Bot) -> None:
         local_hm = local_now.strftime("%H:%M")
         local_date = local_now.strftime("%Y-%m-%d")
 
-        if local_hm == checkin_time and user.get("last_checkin_date") != local_date:
+        if is_time_in_window(local_hm, checkin_time, 30) and user.get("last_checkin_date") != local_date:
             weekday = local_now.isoweekday()
             habits = await habits_repo.get_today_habits_with_status(user_id, local_date, weekday)
 
             if habits:
-                total_count = len(habits)
-                completed_count = sum(1 for h in habits if h.get("is_completed"))
-                frozen_count = sum(1 for h in habits if h.get("is_frozen_today"))
+                nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+                nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+                water_cur = await water_repo.get_daily_water(user_id, local_date)
+                water_tgt = await water_repo.get_water_target(user_id)
 
-                text_lines = [
-                    f"🌙 **Вечерний чек-ин продуктивности!**",
-                    f"📅 Дата: {local_date}",
-                    f"📊 Прогресс: {completed_count + frozen_count}/{total_count} выполнено/заморожено\n",
-                ]
-
-                for h in habits:
-                    spent = h.get("spent_minutes", 0)
-                    target = h["target_minutes"]
-                    if h.get("is_completed"):
-                        status_str = f"✅ «{h['name']}» — {spent}/{target} мин"
-                    elif h.get("is_frozen_today"):
-                        status_str = f"❄️ «{h['name']}» — Заморожено"
-                    else:
-                        remaining = max(0, target - spent)
-                        status_str = f"⏳ «{h['name']}» — {spent}/{target} мин (осталось {remaining} мин)"
-                    text_lines.append(status_str)
-
-                text_lines.append("\nОтметьте оставшиеся привычки или завершите чек-ин:")
+                checkin_text = format_checkin_text(
+                    habits=habits,
+                    local_date=local_date,
+                    nutrition_summary=nutr_summary,
+                    nutrition_goals=nutr_goals,
+                    water_ml=water_cur,
+                    water_target=water_tgt,
+                )
                 kb = get_checkin_dashboard_keyboard(habits)
 
                 try:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text="\n".join(text_lines),
-                        reply_markup=kb,
-                        parse_mode="Markdown",
-                    )
+                    if is_widget_enabled():
+                        await send_widget_push(
+                            bot=bot,
+                            user_id=user_id,
+                            view="checkin",
+                            title="🌙 Вечерний чек-ин",
+                            body=checkin_text,
+                            local_date=local_date,
+                            local_weekday=weekday,
+                            utc_offset=offset,
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=checkin_text,
+                            reply_markup=kb,
+                        )
                 except Exception as e:
                     logger.warning("Failed to send checkin message to %s: %s", user_id, e)
 
@@ -148,12 +185,18 @@ async def check_evening_checkins(bot: Bot) -> None:
 
 
 async def check_weight_reminders(bot: Bot) -> None:
-    """Trigger morning weight reminder for users at their configured weight_reminder_time."""
+    """Trigger morning weight reminder for users within reminder_time window."""
     users = await users_repo.get_all_users()
     now_utc = datetime.now(timezone.utc)
+    now_ts = int(time.time())
 
     for user in users:
         if not user.get("weight_reminder_enabled"):
+            continue
+
+        # Honor notifications mute setting for weight reminders
+        muted_until = user.get("notifications_muted_until", 0) or 0
+        if muted_until > now_ts:
             continue
 
         user_id = user["user_id"]
@@ -163,23 +206,35 @@ async def check_weight_reminders(bot: Bot) -> None:
         local_hm = local_now.strftime("%H:%M")
         local_date = local_now.strftime("%Y-%m-%d")
 
-        if local_hm == reminder_time and user.get("last_weight_reminder_date") != local_date:
+        if is_time_in_window(local_hm, reminder_time, 30) and user.get("last_weight_reminder_date") != local_date:
             try:
-                kb = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="⚖️ Записать утренний вес", callback_data="weight_enter")],
-                    ]
+                weight_body = (
+                    "🌅 <b>Доброе утро! Время утреннего взвешивания.</b>\n\n"
+                    "Встаньте на весы натощак после пробуждения и зафиксируйте результат, "
+                    "чтобы отслеживать точную динамику веса."
                 )
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "🌅 **Доброе утро! Время утреннего взвешивания.**\n\n"
-                        "Встаньте на весы натощак после пробуждения и зафиксируйте результат, "
-                        "чтобы отслеживать точную динамику веса."
-                    ),
-                    reply_markup=kb,
-                    parse_mode="Markdown",
-                )
+                if is_widget_enabled():
+                    await send_widget_push(
+                        bot=bot,
+                        user_id=user_id,
+                        view="health",
+                        title="⚖️ Утреннее взвешивание",
+                        body=weight_body,
+                        local_date=local_date,
+                        local_weekday=local_now.isoweekday(),
+                        utc_offset=offset,
+                    )
+                else:
+                    kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="⚖️ Записать утренний вес", callback_data="weight_enter")],
+                        ]
+                    )
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=weight_body,
+                        reply_markup=kb,
+                    )
             except Exception as e:
                 logger.warning("Failed to send weight reminder to %s: %s", user_id, e)
 
@@ -187,23 +242,22 @@ async def check_weight_reminders(bot: Bot) -> None:
 
 
 async def check_midnight_resets() -> None:
-    """Handle 00:00 streak calculations and weekly freeze resets for each user's local timezone."""
+    """
+    Handle midnight streak calculations and weekly freeze resets for each user's local timezone.
+    Always executes regardless of notifications_muted_until.
+    Cleans up old records from habit_reminders_log.
+    """
     users = await users_repo.get_all_users()
     now_utc = datetime.now(timezone.utc)
 
     for user in users:
-        now_ts = int(time.time())
-        muted_until = user.get("notifications_muted_until", 0) or 0
-        if muted_until > now_ts:
-            continue
-
         user_id = user["user_id"]
         offset = user.get("utc_offset", 3)
         local_now = now_utc + timedelta(hours=offset)
         local_date = local_now.strftime("%Y-%m-%d")
 
-        # Check if local time is within midnight window (00:00 - 00:05) and not yet processed
-        if local_now.hour == 0 and local_now.minute <= 5 and user.get("last_midnight_date") != local_date:
+        # Process if day has changed since last processed midnight
+        if user.get("last_midnight_date") != local_date:
             yesterday_dt = local_now - timedelta(days=1)
             yesterday_date = yesterday_dt.strftime("%Y-%m-%d")
             yesterday_weekday = yesterday_dt.isoweekday()
@@ -221,6 +275,14 @@ async def check_midnight_resets() -> None:
 
             await users_repo.update_user_last_midnight_date(user_id, local_date)
 
+    # Clean up reminder logs older than 14 days and widget messages older than 30 days
+    cutoff_date = (now_utc - timedelta(days=14)).strftime("%Y-%m-%d")
+    try:
+        await habits_repo.cleanup_old_reminders_log(cutoff_date)
+        await widgets_repo.cleanup_old_widget_messages(days=30)
+    except Exception as e:
+        logger.debug("Failed to clean up old reminders log or widget messages: %s", e)
+
 
 async def check_habit_reminders(bot: Bot) -> None:
     """Send habit reminder pushes and trigger due snoozed notifications."""
@@ -232,7 +294,7 @@ async def check_habit_reminders(bot: Bot) -> None:
     for snooze in due_snoozes:
         user_id = snooze["user_id"]
         habit_id = snooze["habit_id"]
-        name = snooze["name"]
+        name = html.escape(snooze["name"])
         snooze_id = snooze["snooze_id"]
 
         user = await users_repo.get_user(user_id)
@@ -243,11 +305,10 @@ async def check_habit_reminders(bot: Bot) -> None:
                 await bot.send_message(
                     chat_id=user_id,
                     text=(
-                        f"⏰ **Напоминание (после откладывания):** «{name}»!\n\n"
+                        f"⏰ <b>Напоминание (после откладывания):</b> «{name}»!\n\n"
                         f"Время выполнить действие и подтвердить результат."
                     ),
                     reply_markup=kb,
-                    parse_mode="Markdown",
                 )
             except Exception as e:
                 logger.warning("Failed to send snoozed reminder to %s: %s", user_id, e)
@@ -278,22 +339,22 @@ async def check_habit_reminders(bot: Bot) -> None:
 
             scheduled_times = [t.strip() for t in rem_str.split(",") if t.strip()]
             for rem_time in scheduled_times:
-                if local_hm == rem_time:
+                if is_time_in_window(local_hm, rem_time, 30):
                     already_sent = await habits_repo.was_habit_reminder_sent(h["id"], local_date, rem_time)
                     if not already_sent:
                         cur_reps = h.get("completed_repeats", 0)
                         tgt_reps = h.get("target_repeats", 1) or 1
+                        escaped_h_name = html.escape(h["name"])
                         try:
                             kb = get_habit_reminder_push_keyboard(h["id"])
                             await bot.send_message(
                                 chat_id=user_id,
                                 text=(
-                                    f"🔔 **Напоминание по привычке:** «{h['name']}»!\n\n"
-                                    f"📊 Прогресс за сегодня: **{cur_reps}/{tgt_reps}**\n\n"
+                                    f"🔔 <b>Напоминание по привычке:</b> «{escaped_h_name}»!\n\n"
+                                    f"📊 Прогресс за сегодня: <b>{cur_reps}/{tgt_reps}</b>\n\n"
                                     f"Не забудьте выполнить действие!"
                                 ),
                                 reply_markup=kb,
-                                parse_mode="Markdown",
                             )
                         except Exception as e:
                             logger.warning("Failed to send habit reminder to %s: %s", user_id, e)
@@ -301,10 +362,10 @@ async def check_habit_reminders(bot: Bot) -> None:
                         await habits_repo.record_habit_reminder_sent(h["id"], user_id, local_date, rem_time)
 
 
-async def global_tick(bot: Bot) -> None:
+async def global_tick(bot: Bot, storage: Optional[BaseStorage] = None) -> None:
     """Tick executed every 60 seconds by APScheduler."""
     try:
-        await check_active_timers(bot)
+        await check_active_timers(bot, storage)
     except Exception as e:
         logger.error("Error checking active timers: %s", e, exc_info=True)
 
@@ -329,14 +390,14 @@ async def global_tick(bot: Bot) -> None:
         logger.error("Error in midnight resets: %s", e, exc_info=True)
 
 
-def init_scheduler(bot: Bot) -> AsyncIOScheduler:
+def init_scheduler(bot: Bot, storage: Optional[BaseStorage] = None) -> AsyncIOScheduler:
     """Initialize and start the AsyncIOScheduler instance."""
     scheduler = AsyncIOScheduler(timezone=timezone.utc)
     scheduler.add_job(
         global_tick,
         "interval",
         seconds=60,
-        args=[bot],
+        args=[bot, storage],
         id="global_bot_tick",
         replace_existing=True,
     )

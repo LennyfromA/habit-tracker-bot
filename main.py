@@ -14,6 +14,8 @@ from bot.database.db import init_db
 from bot.handlers import checkin, habits, nutrition, start, stats, timer
 from bot.middlewares.user_check import UserCheckMiddleware
 from bot.services.scheduler import init_scheduler
+from bot.services.widget_launcher import is_widget_enabled
+from bot.web.server import start_web_server, stop_web_server
 
 
 def setup_logging() -> None:
@@ -46,9 +48,10 @@ async def main() -> None:
     # 2. Instantiate Bot and Dispatcher
     bot = Bot(
         token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher(storage=MemoryStorage())
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
 
     # 3. Register Middlewares
     user_middleware = UserCheckMiddleware()
@@ -64,16 +67,28 @@ async def main() -> None:
     dp.include_router(stats.router)
 
     # 5. Initialize & Start APScheduler
-    scheduler = init_scheduler(bot)
+    scheduler = init_scheduler(bot, storage=storage)
     scheduler.start()
     logger.info("APScheduler initialized and running.")
 
-    # 6. Start Polling with clean shutdown
+    # 6. Start Embedded Web Server for Mini App Widget
+    if is_widget_enabled():
+        logger.info("🚀 Telegram Mini App widget enabled: %s", settings.WIDGET_BASE_URL)
+    else:
+        logger.warning(
+            "⚠️ WIDGET_BASE_URL is not configured or does not start with https://. "
+            "Bot will run in graceful fallback mode using standard Telegram messages."
+        )
+
+    web_runner = await start_web_server(bot, settings.WEB_HOST, settings.WEB_PORT)
+
+    # 7. Start Polling with clean shutdown
     try:
         logger.info("Bot started polling.")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        logger.info("Shutting down bot and scheduler...")
+        logger.info("Shutting down bot, web server, and scheduler...")
+        await stop_web_server(web_runner)
         scheduler.shutdown(wait=False)
         await bot.session.close()
         logger.info("Shutdown complete.")
