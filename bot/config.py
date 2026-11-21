@@ -1,7 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 
 class Settings(BaseSettings):
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     )
     WEB_PORT: int = Field(
         default=8080,
+        validation_alias=AliasChoices("WEB_PORT", "SERVER_PORT", "PORT"),
         description="Bind port for embedded aiohttp server",
     )
     WEBAPP_AUTH_MAX_AGE: int = Field(

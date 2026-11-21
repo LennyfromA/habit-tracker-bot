@@ -82,9 +82,17 @@ async def start_auto_tunnel(local_port: int, token: Optional[str] = None) -> Opt
         return None
 
     if token:
-        cmd = [bin_path, "tunnel", "run", "--token", token]
+        cmd = [bin_path, "tunnel", "--protocol", "http2", "run", "--token", token]
     else:
-        cmd = [bin_path, "tunnel", "--url", f"http://127.0.0.1:{local_port}"]
+        cmd = [
+            bin_path,
+            "tunnel",
+            "--protocol",
+            "http2",
+            "--url",
+            f"http://127.0.0.1:{local_port}",
+            "--no-autoupdate",
+        ]
 
     logger.info("Starting auto-tunnel process: %s", " ".join(cmd))
     try:
