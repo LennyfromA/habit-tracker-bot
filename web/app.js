@@ -40,7 +40,8 @@
 
     const params = new URLSearchParams(window.location.search);
     state.wid = params.get("wid") || "";
-    state.isDev = params.get("dev") === "1" || params.get("preview") === "1";
+    // Automatically enable preview mode if opened in a regular browser outside Telegram
+    state.isDev = params.get("dev") === "1" || params.get("preview") === "1" || !tg?.initData;
     const viewParam = params.get("view") || "habits";
 
     if (viewParam === "checkin") {
