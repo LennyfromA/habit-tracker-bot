@@ -107,8 +107,17 @@ async def api_bootstrap(request: web.Request) -> web.Response:
         },
         "stats_7d": {
             "dates_7": dates_7,
+            "dates": dates_7,
+            "period": 7,
             "daily_focus": weekly_stats.get("daily", {}),
+            "daily_completed": await habits_repo.get_daily_completed_counts(user_id, start_date_str, local_date),
             "habits_breakdown": weekly_stats.get("habits", []),
+            "daily_calories": await nutrition_repo.get_weekly_nutrition_stats(user_id, start_date_str, local_date),
+            "daily_water": await water_repo.get_weekly_water_stats(user_id, start_date_str, local_date),
+            "daily_weight": await weight_repo.get_weight_range(user_id, start_date_str, local_date),
+            "weight_stats": weight_stats,
+            "nutrition_goals": nutr_goals,
+            "water_target": water_tgt,
         },
     }
     return web.json_response({"ok": True, "data": data})
@@ -116,38 +125,47 @@ async def api_bootstrap(request: web.Request) -> web.Response:
 
 @routes.get("/api/stats")
 async def api_stats(request: web.Request) -> web.Response:
-    """Return 7-day productivity and health analytics."""
+    """Return productivity and health analytics for a requested period (7, 15, 30, 90 days)."""
     auth = request["auth"]
     user_id = auth["user_id"]
     local_date = auth["local_date"]
 
+    try:
+        period_days = int(request.query.get("period", "7"))
+    except (ValueError, TypeError):
+        period_days = 7
+
+    if period_days not in (7, 15, 30, 90):
+        period_days = 7
+
     end_dt = datetime.strptime(local_date, "%Y-%m-%d")
-    dates_7 = [(end_dt - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
-    start_date_str = dates_7[0]
+    dates = [(end_dt - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(period_days - 1, -1, -1)]
+    start_date_str = dates[0]
 
-    weekly_habits = await habits_repo.get_weekly_stats(user_id, start_date_str, local_date)
-
-    # Aggregate daily calories and water for 7 days
-    daily_calories: Dict[str, int] = {}
-    daily_water: Dict[str, int] = {}
-
-    for d in dates_7:
-        d_summary = await nutrition_repo.get_daily_summary(user_id, d)
-        daily_calories[d] = d_summary.get("total_calories", 0)
-        daily_water[d] = await water_repo.get_daily_water(user_id, d)
-
+    habits_data = await habits_repo.get_weekly_stats(user_id, start_date_str, local_date)
+    daily_completed = await habits_repo.get_daily_completed_counts(user_id, start_date_str, local_date)
+    daily_calories = await nutrition_repo.get_weekly_nutrition_stats(user_id, start_date_str, local_date)
+    daily_water = await water_repo.get_weekly_water_stats(user_id, start_date_str, local_date)
+    daily_weight = await weight_repo.get_weight_range(user_id, start_date_str, local_date)
     weight_stats = await weight_repo.get_weight_stats(user_id, local_date)
+    nutrition_goals = await nutrition_repo.get_nutrition_goals(user_id)
+    water_target = await water_repo.get_water_target(user_id)
 
     return web.json_response(
         {
             "ok": True,
             "data": {
-                "dates_7": dates_7,
-                "daily_focus": weekly_habits.get("daily", {}),
-                "habits_breakdown": weekly_habits.get("habits", []),
+                "period": period_days,
+                "dates": dates,
+                "daily_focus": habits_data.get("daily", {}),
+                "daily_completed": daily_completed,
+                "habits_breakdown": habits_data.get("habits", []),
                 "daily_calories": daily_calories,
                 "daily_water": daily_water,
+                "daily_weight": daily_weight,
                 "weight_stats": weight_stats,
+                "nutrition_goals": nutrition_goals,
+                "water_target": water_target,
             },
         }
     )

@@ -21,6 +21,10 @@
     selectedFoodItem: null,
     timerReflectionData: null,
     filterHabits: "today", // 'today' or 'all'
+    statsPeriod: 7, // 7, 15, 30, 90
+    statsMetric: "focus", // 'focus', 'habits', 'calories', 'water', 'weight'
+    statsCache: {},
+    isLoadingStats: false,
   };
 
   const tg = window.Telegram?.WebApp;
@@ -172,7 +176,7 @@
       habits: state.isCheckinMode ? "Вечерний чек-ин" : "Мои привычки",
       timer: "Фокус-сессия",
       health: "Здоровье и КБЖУ",
-      stats: "Итоги недели",
+      stats: `Итоги (${state.statsPeriod || 7} дней)`,
       settings: "Настройки",
     };
 
@@ -1346,100 +1350,514 @@
   }
 
   // =========================================================================
-  // 4. STATS VIEW (KPI cards, native SVG focus chart, habit breakdowns)
+  // 4. STATS VIEW (Periods: 7, 15, 30, 90 days; Metrics: focus, habits, calories, water, weight)
   // =========================================================================
+  async function loadStatsPeriod(period) {
+    if (state.isLoadingStats) return;
+    state.isLoadingStats = true;
+    try {
+      const res = await apiFetch(`/api/stats?period=${period}`);
+      if (res && res.data) {
+        state.statsCache[period] = res.data;
+      }
+    } catch (e) {
+      showToast("Не удалось загрузить аналитику", true);
+    } finally {
+      state.isLoadingStats = false;
+      const appView = document.getElementById("app-view");
+      if (state.activeTab === "stats" && appView) {
+        renderStatsView(appView);
+      }
+    }
+  }
+
   function renderStatsView(container) {
-    const s7 = state.bootstrap?.stats_7d || {};
-    const dailyFocus = s7.daily_focus || [];
-    const habitsBreakdown = s7.habits_breakdown || [];
-    const dailyCals = s7.daily_calories || [];
+    updateHeader();
+    const period = state.statsPeriod || 7;
+    const metric = state.statsMetric || "focus";
 
-    const totalFocusMin = dailyFocus.reduce((sum, d) => sum + (d.minutes || 0), 0);
-    const activeDaysCount = dailyFocus.filter((d) => (d.minutes || 0) > 0).length;
+    let statsData = state.statsCache[period];
+    if (!statsData && period === 7 && state.bootstrap?.stats_7d) {
+      statsData = state.bootstrap.stats_7d;
+    }
 
-    // Build Native SVG 7-Day Bar Chart
-    const svgWidth = 320;
-    const svgHeight = 150;
-    const paddingLeft = 30;
-    const paddingRight = 10;
-    const paddingTop = 20;
-    const paddingBottom = 30;
+    if (!statsData) {
+      container.innerHTML = `
+        <div class="period-selector">
+          <button type="button" class="period-pill ${period === 7 ? "active" : ""}" data-period="7">7 дней</button>
+          <button type="button" class="period-pill ${period === 15 ? "active" : ""}" data-period="15">15 дней</button>
+          <button type="button" class="period-pill ${period === 30 ? "active" : ""}" data-period="30">30 дней</button>
+          <button type="button" class="period-pill ${period === 90 ? "active" : ""}" data-period="90">90 дней</button>
+        </div>
+        <div class="loading-state" style="margin-top:40px;">
+          <div class="spinner"></div>
+          <p>Загрузка аналитики за ${period} дней...</p>
+        </div>
+      `;
+      setupStatsEvents(container);
+      loadStatsPeriod(period);
+      return;
+    }
 
-    const maxMin = Math.max(30, ...dailyFocus.map((d) => d.minutes || 0));
+    const dates = statsData.dates || statsData.dates_7 || [];
+    const habitsBreakdown = statsData.habits_breakdown || [];
+
+    // 1. Compute Metric Values
+    let kpiHtml = "";
+    let chartSvg = "";
+    let detailSectionHtml = "";
+
+    const svgWidth = 330;
+    const svgHeight = 160;
+    const paddingLeft = 34;
+    const paddingRight = 12;
+    const paddingTop = 22;
+    const paddingBottom = 26;
     const plotWidth = svgWidth - paddingLeft - paddingRight;
     const plotHeight = svgHeight - paddingTop - paddingBottom;
-    const colWidth = plotWidth / Math.max(1, dailyFocus.length);
-    const barWidth = Math.max(12, colWidth - 8);
+    const numDays = Math.max(1, dates.length);
+    const colWidth = plotWidth / numDays;
 
-    let barsSvg = "";
-    dailyFocus.forEach((d, idx) => {
-      const minutes = d.minutes || 0;
-      const barH = Math.round((minutes / maxMin) * plotHeight);
-      const x = paddingLeft + idx * colWidth + (colWidth - barWidth) / 2;
-      const y = paddingTop + (plotHeight - barH);
+    function getXLabelStep(len) {
+      if (len <= 7) return 1;
+      if (len <= 15) return 2;
+      if (len <= 30) return 5;
+      return 15;
+    }
+    const labelStep = getXLabelStep(numDays);
 
-      // Date label (DD.MM)
-      const dateParts = (d.date || "").split("-");
-      const shortDate = dateParts.length === 3 ? `${dateParts[2]}.${dateParts[1]}` : d.date;
+    if (metric === "focus") {
+      const dailyFocusDict = statsData.daily_focus || {};
+      const focusVals = dates.map((d) => (typeof dailyFocusDict[d] === "number" ? dailyFocusDict[d] : 0));
+      const totalFocusMin = focusVals.reduce((acc, v) => acc + v, 0);
+      const activeDays = focusVals.filter((v) => v > 0).length;
+      const avgMin = Math.round(totalFocusMin / numDays);
+      const maxMin = Math.max(30, ...focusVals);
 
-      barsSvg += `
-        <rect class="chart-bar" x="${x}" y="${y}" width="${barWidth}" height="${barH}"></rect>
-        <text class="chart-text" x="${x + barWidth / 2}" y="${y - 4}">${minutes > 0 ? minutes : ""}</text>
-        <text class="chart-text" x="${x + barWidth / 2}" y="${svgHeight - 8}">${shortDate}</text>
+      const hours = Math.floor(totalFocusMin / 60);
+      const mins = totalFocusMin % 60;
+      const totalStr = hours > 0 ? `${hours}ч ${mins}м` : `${mins} мин`;
+
+      kpiHtml = `
+        <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ВСЕГО В ФОКУСЕ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--accent);">${totalStr}</span>
+            <span style="font-size:0.72rem; color:var(--hint);">~${avgMin} мин / день</span>
+          </div>
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">АКТИВНЫХ ДНЕЙ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--success);">${activeDays} / ${numDays}</span>
+            <span style="font-size:0.72rem; color:var(--hint);">Рекорд: ${maxMin} мин</span>
+          </div>
+        </div>
       `;
-    });
 
-    let habitsBreakdownHtml = "";
-    if (habitsBreakdown.length === 0) {
-      habitsBreakdownHtml = `<p style="font-size:0.8rem; color:var(--hint); text-align:center;">Нет данных за неделю</p>`;
-    } else {
-      habitsBreakdownHtml = habitsBreakdown
-        .map((h) => {
-          const isChecklist = h.habit_type === "checklist";
-          const valStr = isChecklist
-            ? `${h.total_repeats || 0} повторений`
-            : `${h.total_minutes || 0} мин`;
-          return `
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--surface-border);">
+      const barWidth = Math.max(3, colWidth - (numDays > 30 ? 1 : numDays > 15 ? 3 : 6));
+      let bars = "";
+      focusVals.forEach((val, idx) => {
+        const barH = maxMin > 0 ? Math.round((val / maxMin) * plotHeight) : 0;
+        const x = paddingLeft + idx * colWidth + (colWidth - barWidth) / 2;
+        const y = paddingTop + (plotHeight - barH);
+
+        const showLabel = (idx % labelStep === 0) || (idx === numDays - 1);
+        const dParts = dates[idx].split("-");
+        const shortDate = dParts.length === 3 ? `${dParts[2]}.${dParts[1]}` : dates[idx];
+
+        bars += `
+          <rect class="chart-bar" x="${x}" y="${y}" width="${barWidth}" height="${barH}">
+            <title>${dates[idx]}: ${val} мин</title>
+          </rect>
+          ${val > 0 && numDays <= 15 ? `<text class="chart-text" x="${x + barWidth / 2}" y="${y - 4}" font-size="9">${val}</text>` : ""}
+          ${showLabel ? `<text class="chart-text" x="${x + barWidth / 2}" y="${svgHeight - 6}" font-size="9">${shortDate}</text>` : ""}
+        `;
+      });
+
+      chartSvg = `
+        <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
+          <line x1="${paddingLeft}" y1="${paddingTop}" x2="${svgWidth - paddingRight}" y2="${paddingTop}" stroke="var(--surface-border)" stroke-dasharray="2 3"></line>
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight / 2}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight / 2}" stroke="var(--surface-border)" stroke-dasharray="2 3"></line>
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight}" stroke="var(--surface-border)"></line>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + 4}" text-anchor="end" font-size="8">${maxMin}м</text>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + plotHeight}" text-anchor="end" font-size="8">0</text>
+          ${bars}
+        </svg>
+      `;
+
+      let habitsRows = habitsBreakdown.length === 0
+        ? `<p style="font-size:0.8rem; color:var(--hint); text-align:center; padding:10px 0;">Нет данных по привычкам за этот период</p>`
+        : habitsBreakdown.map((h) => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--surface-border);">
               <span style="font-weight:500; font-size:0.88rem;">${escapeHtml(h.name)}</span>
-              <span class="badge">${valStr}</span>
+              <span class="badge" style="font-weight:600;">${h.habit_type === "checklist" ? `${h.total_repeats || 0} повт.` : `${h.total_spent || h.total_minutes || 0} мин`}</span>
             </div>
+          `).join("");
+
+      detailSectionHtml = `
+        <div class="card">
+          <span class="card-title">📋 Привычки за выбранный период</span>
+          <div style="display:flex; flex-direction:column;">${habitsRows}</div>
+        </div>
+      `;
+
+    } else if (metric === "habits") {
+      const dailyCompletedDict = statsData.daily_completed || {};
+      const completedVals = dates.map((d) => (typeof dailyCompletedDict[d] === "number" ? dailyCompletedDict[d] : 0));
+      const totalCompleted = completedVals.reduce((acc, v) => acc + v, 0);
+      const activeDays = completedVals.filter((v) => v > 0).length;
+      const maxCompleted = Math.max(4, ...completedVals);
+
+      kpiHtml = `
+        <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ВЫПОЛНЕНО ПРИВЫЧЕК</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--success);">${totalCompleted}</span>
+            <span style="font-size:0.72rem; color:var(--hint);">~${(totalCompleted / numDays).toFixed(1)} / день</span>
+          </div>
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ПРОДУКТИВНЫХ ДНЕЙ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--accent);">${activeDays} / ${numDays}</span>
+            <span style="font-size:0.72rem; color:var(--hint);">Всего привычек: ${habitsBreakdown.length}</span>
+          </div>
+        </div>
+      `;
+
+      const barWidth = Math.max(3, colWidth - (numDays > 30 ? 1 : numDays > 15 ? 3 : 6));
+      let bars = "";
+      completedVals.forEach((val, idx) => {
+        const barH = maxCompleted > 0 ? Math.round((val / maxCompleted) * plotHeight) : 0;
+        const x = paddingLeft + idx * colWidth + (colWidth - barWidth) / 2;
+        const y = paddingTop + (plotHeight - barH);
+
+        const showLabel = (idx % labelStep === 0) || (idx === numDays - 1);
+        const dParts = dates[idx].split("-");
+        const shortDate = dParts.length === 3 ? `${dParts[2]}.${dParts[1]}` : dates[idx];
+
+        bars += `
+          <rect class="chart-bar" style="fill:var(--success);" x="${x}" y="${y}" width="${barWidth}" height="${barH}">
+            <title>${dates[idx]}: ${val} выполнено</title>
+          </rect>
+          ${val > 0 && numDays <= 15 ? `<text class="chart-text" x="${x + barWidth / 2}" y="${y - 4}" font-size="9">${val}</text>` : ""}
+          ${showLabel ? `<text class="chart-text" x="${x + barWidth / 2}" y="${svgHeight - 6}" font-size="9">${shortDate}</text>` : ""}
+        `;
+      });
+
+      chartSvg = `
+        <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
+          <line x1="${paddingLeft}" y1="${paddingTop}" x2="${svgWidth - paddingRight}" y2="${paddingTop}" stroke="var(--surface-border)" stroke-dasharray="2 3"></line>
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight / 2}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight / 2}" stroke="var(--surface-border)" stroke-dasharray="2 3"></line>
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight}" stroke="var(--surface-border)"></line>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + 4}" text-anchor="end" font-size="8">${maxCompleted}</text>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + plotHeight}" text-anchor="end" font-size="8">0</text>
+          ${bars}
+        </svg>
+      `;
+
+      let habitsRows = habitsBreakdown.length === 0
+        ? `<p style="font-size:0.8rem; color:var(--hint); text-align:center; padding:10px 0;">Нет активных привычек</p>`
+        : habitsBreakdown.map((h) => `
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--surface-border);">
+              <div>
+                <span style="font-weight:500; font-size:0.88rem;">${escapeHtml(h.name)}</span>
+                <span style="font-size:0.75rem; color:var(--hint); margin-left:6px;">🔥 ${h.streak_days || 0} дн.</span>
+              </div>
+              <span class="badge" style="background-color:color-mix(in srgb, var(--success) 15%, transparent); color:var(--success); font-weight:600;">
+                ${h.completed_days || 0} / ${numDays} дн.
+              </span>
+            </div>
+          `).join("");
+
+      detailSectionHtml = `
+        <div class="card">
+          <span class="card-title">🎯 Выполнение по каждой привычке</span>
+          <div style="display:flex; flex-direction:column;">${habitsRows}</div>
+        </div>
+      `;
+
+    } else if (metric === "calories") {
+      const dailyCalDict = statsData.daily_calories || {};
+      const calVals = dates.map((d) => (typeof dailyCalDict[d] === "number" ? dailyCalDict[d] : 0));
+      const targetCals = statsData.nutrition_goals?.target_calories || state.bootstrap?.nutrition?.goals?.target_calories || 2000;
+      const loggedDays = calVals.filter((v) => v > 0).length;
+      const totalCals = calVals.reduce((acc, v) => acc + v, 0);
+      const avgCals = loggedDays > 0 ? Math.round(totalCals / loggedDays) : 0;
+      const maxCals = Math.max(targetCals * 1.15, ...calVals, 1000);
+
+      kpiHtml = `
+        <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">СРЕДНЯЯ КАЛОРИЙНОСТЬ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:#f43f5e;">${avgCals} ккал</span>
+            <span style="font-size:0.72rem; color:var(--hint);">Цель: ${targetCals} ккал</span>
+          </div>
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ДНЕЙ С ЗАПИСЯМИ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--accent);">${loggedDays} / ${numDays}</span>
+            <span style="font-size:0.72rem; color:var(--hint);">Всего: ${totalCals} ккал</span>
+          </div>
+        </div>
+      `;
+
+      const targetY = paddingTop + (plotHeight - Math.round((targetCals / maxCals) * plotHeight));
+      const barWidth = Math.max(3, colWidth - (numDays > 30 ? 1 : numDays > 15 ? 3 : 6));
+      let bars = "";
+      calVals.forEach((val, idx) => {
+        const barH = maxCals > 0 ? Math.round((val / maxCals) * plotHeight) : 0;
+        const x = paddingLeft + idx * colWidth + (colWidth - barWidth) / 2;
+        const y = paddingTop + (plotHeight - barH);
+
+        const showLabel = (idx % labelStep === 0) || (idx === numDays - 1);
+        const dParts = dates[idx].split("-");
+        const shortDate = dParts.length === 3 ? `${dParts[2]}.${dParts[1]}` : dates[idx];
+
+        bars += `
+          <rect class="chart-bar" style="fill:#f43f5e;" x="${x}" y="${y}" width="${barWidth}" height="${barH}">
+            <title>${dates[idx]}: ${val} ккал</title>
+          </rect>
+          ${val > 0 && numDays <= 15 ? `<text class="chart-text" x="${x + barWidth / 2}" y="${y - 4}" font-size="8">${val}</text>` : ""}
+          ${showLabel ? `<text class="chart-text" x="${x + barWidth / 2}" y="${svgHeight - 6}" font-size="9">${shortDate}</text>` : ""}
+        `;
+      });
+
+      chartSvg = `
+        <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
+          <line x1="${paddingLeft}" y1="${targetY}" x2="${svgWidth - paddingRight}" y2="${targetY}" class="chart-target-line"></line>
+          <text x="${paddingLeft + 4}" y="${targetY - 3}" font-size="8" fill="var(--warning)">Цель: ${targetCals}</text>
+
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight}" stroke="var(--surface-border)"></line>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + 4}" text-anchor="end" font-size="8">${Math.round(maxCals)}</text>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + plotHeight}" text-anchor="end" font-size="8">0</text>
+          ${bars}
+        </svg>
+      `;
+
+    } else if (metric === "water") {
+      const dailyWaterDict = statsData.daily_water || {};
+      const waterVals = dates.map((d) => (typeof dailyWaterDict[d] === "number" ? dailyWaterDict[d] : 0));
+      const targetWater = statsData.water_target || state.bootstrap?.water?.target_ml || 2000;
+      const loggedDays = waterVals.filter((v) => v > 0).length;
+      const goalReachedDays = waterVals.filter((v) => v >= targetWater).length;
+      const totalWater = waterVals.reduce((acc, v) => acc + v, 0);
+      const avgWater = loggedDays > 0 ? Math.round(totalWater / loggedDays) : 0;
+      const maxWater = Math.max(targetWater * 1.15, ...waterVals, 1000);
+
+      kpiHtml = `
+        <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">СРЕДНЕЕ ПОТРЕБЛЕНИЕ</span>
+            <span style="font-size:1.45rem; font-weight:700; color:#0ea5e9;">${avgWater} мл</span>
+            <span style="font-size:0.72rem; color:var(--hint);">Норма: ${targetWater} мл</span>
+          </div>
+          <div class="card" style="align-items:center; text-align:center;">
+            <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">НОРМА ДОСТИГНУТА</span>
+            <span style="font-size:1.45rem; font-weight:700; color:var(--success);">${goalReachedDays} дн.</span>
+            <span style="font-size:0.72rem; color:var(--hint);">${Math.round((goalReachedDays / numDays) * 100)}% дней</span>
+          </div>
+        </div>
+      `;
+
+      const targetY = paddingTop + (plotHeight - Math.round((targetWater / maxWater) * plotHeight));
+      const barWidth = Math.max(3, colWidth - (numDays > 30 ? 1 : numDays > 15 ? 3 : 6));
+      let bars = "";
+      waterVals.forEach((val, idx) => {
+        const barH = maxWater > 0 ? Math.round((val / maxWater) * plotHeight) : 0;
+        const x = paddingLeft + idx * colWidth + (colWidth - barWidth) / 2;
+        const y = paddingTop + (plotHeight - barH);
+
+        const showLabel = (idx % labelStep === 0) || (idx === numDays - 1);
+        const dParts = dates[idx].split("-");
+        const shortDate = dParts.length === 3 ? `${dParts[2]}.${dParts[1]}` : dates[idx];
+
+        bars += `
+          <rect class="chart-bar" style="fill:#0ea5e9;" x="${x}" y="${y}" width="${barWidth}" height="${barH}">
+            <title>${dates[idx]}: ${val} мл</title>
+          </rect>
+          ${val > 0 && numDays <= 15 ? `<text class="chart-text" x="${x + barWidth / 2}" y="${y - 4}" font-size="8">${val}</text>` : ""}
+          ${showLabel ? `<text class="chart-text" x="${x + barWidth / 2}" y="${svgHeight - 6}" font-size="9">${shortDate}</text>` : ""}
+        `;
+      });
+
+      chartSvg = `
+        <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
+          <line x1="${paddingLeft}" y1="${targetY}" x2="${svgWidth - paddingRight}" y2="${targetY}" class="chart-target-line"></line>
+          <text x="${paddingLeft + 4}" y="${targetY - 3}" font-size="8" fill="var(--warning)">Цель: ${targetWater} мл</text>
+
+          <line x1="${paddingLeft}" y1="${paddingTop + plotHeight}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight}" stroke="var(--surface-border)"></line>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + 4}" text-anchor="end" font-size="8">${Math.round(maxWater)}</text>
+          <text class="chart-text" x="${paddingLeft - 6}" y="${paddingTop + plotHeight}" text-anchor="end" font-size="8">0</text>
+          ${bars}
+        </svg>
+      `;
+
+    } else if (metric === "weight") {
+      const dailyWeightDict = statsData.daily_weight || {};
+      const measuredEntries = [];
+      dates.forEach((d, idx) => {
+        if (typeof dailyWeightDict[d] === "number") {
+          measuredEntries.push({ date: d, weight: dailyWeightDict[d], idx });
+        }
+      });
+
+      if (measuredEntries.length === 0) {
+        kpiHtml = `
+          <div class="card" style="text-align:center; padding:18px;">
+            <span style="font-size:1.1rem; font-weight:600;">⚖️ Нет записей веса</span>
+            <p style="font-size:0.8rem; color:var(--hint); margin-top:6px;">За выбранный период (${numDays} дней) вес не был зафиксирован. Запишите вес на вкладке «Здоровье».</p>
+          </div>
+        `;
+        chartSvg = "";
+      } else {
+        const weights = measuredEntries.map((e) => e.weight);
+        const latestW = weights[weights.length - 1];
+        const firstW = weights[0];
+        const minW = Math.min(...weights);
+        const maxW = Math.max(...weights);
+        const diff = (latestW - firstW).toFixed(1);
+        const diffStr = diff > 0 ? `+${diff} кг` : `${diff} кг`;
+        const diffColor = diff < 0 ? "var(--success)" : diff > 0 ? "var(--warning)" : "var(--hint)";
+
+        kpiHtml = `
+          <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
+            <div class="card" style="align-items:center; text-align:center;">
+              <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ТЕКУЩИЙ ВЕС</span>
+              <span style="font-size:1.45rem; font-weight:700; color:var(--text);">${latestW} кг</span>
+              <span style="font-size:0.72rem; color:${diffColor}; font-weight:600;">${diffStr} за период</span>
+            </div>
+            <div class="card" style="align-items:center; text-align:center;">
+              <span style="font-size:0.72rem; color:var(--hint); font-weight:600;">ДИАПАЗОН ВЕСА</span>
+              <span style="font-size:1.45rem; font-weight:700; color:var(--accent);">${minW} — ${maxW}</span>
+              <span style="font-size:0.72rem; color:var(--hint);">Записей: ${measuredEntries.length}</span>
+            </div>
+          </div>
+        `;
+
+        const wRange = Math.max(1.0, maxW - minW);
+        const plotMin = minW - wRange * 0.15;
+        const plotMax = maxW + wRange * 0.15;
+        const fullWRange = plotMax - plotMin;
+
+        const points = measuredEntries.map((e) => {
+          const x = paddingLeft + e.idx * colWidth + colWidth / 2;
+          const y = paddingTop + (plotHeight - ((e.weight - plotMin) / fullWRange) * plotHeight);
+          return { x, y, weight: e.weight, date: e.date };
+        });
+
+        const pointsStr = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+        const firstX = points[0].x.toFixed(1);
+        const lastX = points[points.length - 1].x.toFixed(1);
+        const bottomY = (paddingTop + plotHeight).toFixed(1);
+        const areaStr = `${firstX},${bottomY} ${pointsStr} ${lastX},${bottomY}`;
+
+        let dotsSvg = "";
+        points.forEach((p) => {
+          dotsSvg += `
+            <circle class="chart-point" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5">
+              <title>${p.date}: ${p.weight} кг</title>
+            </circle>
+            <text class="chart-text" x="${p.x.toFixed(1)}" y="${(p.y - 6).toFixed(1)}" font-size="8">${p.weight}</text>
           `;
-        })
-        .join("");
+        });
+
+        let xAxisLabels = "";
+        dates.forEach((d, idx) => {
+          if ((idx % labelStep === 0) || (idx === numDays - 1)) {
+            const x = paddingLeft + idx * colWidth + colWidth / 2;
+            const dParts = d.split("-");
+            const shortDate = dParts.length === 3 ? `${dParts[2]}.${dParts[1]}` : d;
+            xAxisLabels += `<text class="chart-text" x="${x}" y="${svgHeight - 6}" font-size="9">${shortDate}</text>`;
+          }
+        });
+
+        chartSvg = `
+          <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
+            <polygon class="chart-area" points="${areaStr}"></polygon>
+            <polyline class="chart-line" points="${pointsStr}"></polyline>
+            ${dotsSvg}
+            <line x1="${paddingLeft}" y1="${paddingTop + plotHeight}" x2="${svgWidth - paddingRight}" y2="${paddingTop + plotHeight}" stroke="var(--surface-border)"></line>
+            ${xAxisLabels}
+          </svg>
+        `;
+
+        let historyRows = measuredEntries.slice().reverse().slice(0, 5).map((e) => `
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px solid var(--surface-border);">
+            <span style="font-weight:500; font-size:0.88rem;">${e.date}</span>
+            <span class="badge" style="font-weight:600;">${e.weight} кг</span>
+          </div>
+        `).join("");
+
+        detailSectionHtml = `
+          <div class="card">
+            <span class="card-title">⚖️ Последние измерения веса</span>
+            <div style="display:flex; flex-direction:column;">${historyRows}</div>
+          </div>
+        `;
+      }
     }
 
     container.innerHTML = `
-      <!-- KPI Row -->
-      <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
-        <div class="card" style="align-items:center; text-align:center;">
-          <span style="font-size:0.75rem; color:var(--hint); font-weight:600;">ФОКУС ЗА 7 ДНЕЙ</span>
-          <span style="font-size:1.6rem; font-weight:700; color:var(--accent);">${totalFocusMin} мин</span>
-        </div>
-        <div class="card" style="align-items:center; text-align:center;">
-          <span style="font-size:0.75rem; color:var(--hint); font-weight:600;">АКТИВНЫХ ДНЕЙ</span>
-          <span style="font-size:1.6rem; font-weight:700; color:var(--success);">${activeDaysCount} / 7</span>
-        </div>
+      <!-- Period Selector Pills -->
+      <div class="period-selector">
+        <button type="button" class="period-pill ${period === 7 ? "active" : ""}" data-period="7">7 дней</button>
+        <button type="button" class="period-pill ${period === 15 ? "active" : ""}" data-period="15">15 дней</button>
+        <button type="button" class="period-pill ${period === 30 ? "active" : ""}" data-period="30">30 дней</button>
+        <button type="button" class="period-pill ${period === 90 ? "active" : ""}" data-period="90">90 дней</button>
       </div>
 
-      <!-- Native SVG Focus Chart -->
-      <div class="card">
-        <span class="card-title">⏱ Минуты фокуса по дням</span>
-        <div class="chart-container">
-          <svg class="svg-chart" viewBox="0 0 ${svgWidth} ${svgHeight}">
-            ${barsSvg}
-          </svg>
-        </div>
+      <!-- Metric Switcher Tabs -->
+      <div class="metric-tabs">
+        <button type="button" class="metric-tab-btn ${metric === "focus" ? "active" : ""}" data-metric="focus">⏱ Фокус</button>
+        <button type="button" class="metric-tab-btn ${metric === "habits" ? "active" : ""}" data-metric="habits">🎯 Привычки</button>
+        <button type="button" class="metric-tab-btn ${metric === "calories" ? "active" : ""}" data-metric="calories">🔥 Калории</button>
+        <button type="button" class="metric-tab-btn ${metric === "water" ? "active" : ""}" data-metric="water">💧 Вода</button>
+        <button type="button" class="metric-tab-btn ${metric === "weight" ? "active" : ""}" data-metric="weight">⚖️ Вес</button>
       </div>
 
-      <!-- Habits Weekly Summary -->
-      <div class="card">
-        <span class="card-title">📋 Привычки за последние 7 дней</span>
-        <div style="display:flex; flex-direction:column;">
-          ${habitsBreakdownHtml}
+      <!-- KPI Summary Cards -->
+      ${kpiHtml}
+
+      <!-- Interactive Native SVG Chart -->
+      ${chartSvg ? `
+        <div class="card">
+          <span class="card-title">${
+            metric === "focus" ? "⏱ Минуты концентрации по дням" :
+            metric === "habits" ? "🎯 Выполнение привычек по дням" :
+            metric === "calories" ? "🔥 Калории относительно цели (ккал)" :
+            metric === "water" ? "💧 Выпитая вода относительно нормы (мл)" :
+            "⚖️ Динамика изменения веса (кг)"
+          }</span>
+          <div class="chart-container">
+            ${chartSvg}
+          </div>
         </div>
-      </div>
+      ` : ""}
+
+      <!-- Detail Breakdowns -->
+      ${detailSectionHtml}
     `;
+
+    setupStatsEvents(container);
+  }
+
+  function setupStatsEvents(container) {
+    container.querySelectorAll(".period-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const p = parseInt(pill.dataset.period, 10);
+        if (p === state.statsPeriod) return;
+        haptic("light");
+        state.statsPeriod = p;
+        renderStatsView(container);
+      });
+    });
+
+    container.querySelectorAll(".metric-tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const m = btn.dataset.metric;
+        if (m === state.statsMetric) return;
+        haptic("light");
+        state.statsMetric = m;
+        renderStatsView(container);
+      });
+    });
   }
 
   // =========================================================================

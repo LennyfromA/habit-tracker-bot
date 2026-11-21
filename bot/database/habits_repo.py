@@ -554,3 +554,18 @@ async def cleanup_old_reminders_log(cutoff_date: str) -> None:
         await db.execute("DELETE FROM habit_reminders_log WHERE reminded_date < ?;", (cutoff_date,))
         await db.commit()
 
+
+async def get_daily_completed_counts(user_id: int, start_date: str, end_date: str) -> Dict[str, int]:
+    """Return dictionary of {logged_date: completed_count} between start_date and end_date."""
+    async with get_db() as db:
+        query = """
+        SELECT logged_date, COUNT(id) AS completed_count
+        FROM habit_logs
+        WHERE user_id = ? AND logged_date BETWEEN ? AND ? AND is_completed = 1
+        GROUP BY logged_date
+        ORDER BY logged_date ASC;
+        """
+        async with db.execute(query, (user_id, start_date, end_date)) as cursor:
+            rows = await cursor.fetchall()
+            return {r["logged_date"]: int(r["completed_count"]) for r in rows}
+

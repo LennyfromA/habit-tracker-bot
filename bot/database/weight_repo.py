@@ -52,6 +52,19 @@ async def get_recent_weights(user_id: int, limit: int = 7) -> List[Dict[str, Any
             return [dict(r) for r in rows]
 
 
+async def get_weight_range(user_id: int, start_date: str, end_date: str) -> Dict[str, float]:
+    """Retrieve weight measurements between start_date and end_date."""
+    async with get_db() as db:
+        query = """
+        SELECT logged_date, weight FROM weight_logs
+        WHERE user_id = ? AND logged_date BETWEEN ? AND ?
+        ORDER BY logged_date ASC;
+        """
+        async with db.execute(query, (user_id, start_date, end_date)) as cursor:
+            rows = await cursor.fetchall()
+            return {r["logged_date"]: float(r["weight"]) for r in rows}
+
+
 async def delete_weight(user_id: int, logged_date: str) -> bool:
     """Delete weight entry for a specific date."""
     async with get_db() as db:
