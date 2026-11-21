@@ -186,6 +186,20 @@ async def test_missing_init_data_header_401(web_client: TestClient):
     assert "auth" in data["error"].lower() or "missing" in data["error"].lower()
 
 
+async def test_dev_preview_mode_allows_access(web_client: TestClient):
+    """Dev preview mode with ?dev=1 or X-Dev-Preview: 1 allows browser access without initData."""
+    resp1 = await web_client.get("/api/bootstrap?dev=1")
+    assert resp1.status == 200
+    data1 = await resp1.json()
+    assert data1["ok"] is True
+    assert "user" in data1["data"]
+
+    resp2 = await web_client.get("/api/bootstrap", headers={"X-Dev-Preview": "1"})
+    assert resp2.status == 200
+    data2 = await resp2.json()
+    assert data2["ok"] is True
+
+
 async def test_invalid_init_data_header_401(web_client: TestClient):
     """API endpoints with malformed initData return HTTP 401."""
     resp = await web_client.get(
@@ -578,3 +592,44 @@ async def test_chat_message_sync(web_client: TestClient, mock_bot: MagicMock):
     res_data2 = await check_resp2.json()
     assert res_data2["ok"] is True
     assert res_data2["synced"] is True
+
+
+async def test_send_widget_card_calling_conventions(mock_bot: MagicMock):
+    """Verify send_widget_card works with both (bot, chat_id, ...) and (target_message, ...) callers."""
+    from bot.services.widget_launcher import send_widget_card
+
+    fake_msg = MagicMock()
+    fake_msg.chat.id = 12345
+    fake_msg.message_id = 9999
+    mock_bot.send_message = AsyncMock(return_value=fake_msg)
+
+    # Calling convention 1: keyword args with bot and chat_id (used by all routers)
+    sent1 = await send_widget_card(
+        bot=mock_bot,
+        chat_id=12345,
+        user_id=TEST_USER_ID,
+        view="dashboard",
+        local_date="2026-11-22",
+        local_weekday=7,
+        utc_offset=3,
+        reply_markup=MagicMock(),
+    )
+    assert sent1.message_id == 9999
+    assert mock_bot.send_message.called
+    args1 = mock_bot.send_message.call_args.kwargs
+    assert args1["chat_id"] == 12345
+    assert "✨ Открыть панель дня" in str(args1["reply_markup"])
+
+    # Calling convention 2: target_message
+    mock_target = MagicMock()
+    mock_target.bot = mock_bot
+    mock_target.chat.id = 54321
+    mock_target.from_user.id = TEST_USER_ID
+
+    sent2 = await send_widget_card(
+        target_message=mock_target,
+        view="habits",
+    )
+    assert sent2.message_id == 9999
+    args2 = mock_bot.send_message.call_args.kwargs
+    assert args2["chat_id"] == 54321

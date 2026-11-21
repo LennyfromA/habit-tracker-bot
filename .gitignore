@@ -55,6 +55,7 @@ htmlcov/
 
 # Project context dumps
 project_context.txt
+cloudflared.exe
 
 # OS generated
 .DS_Store

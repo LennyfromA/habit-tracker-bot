@@ -351,14 +351,53 @@ async def build_chat_card(
 # ---------------------------------------------------------------------------
 
 async def send_widget_card(
-    target_message: Message,
-    user_id: int,
-    view: str,
-    local_date: str,
-    local_weekday: int,
-    utc_offset: int,
+    target_message: Optional[Message] = None,
+    user_id: Optional[int] = None,
+    view: str = "dashboard",
+    local_date: Optional[str] = None,
+    local_weekday: Optional[int] = None,
+    utc_offset: int = 3,
+    bot: Optional[Bot] = None,
+    chat_id: Optional[int] = None,
+    reply_markup: Optional[Any] = None,
+    **kwargs: Any,
 ) -> Message:
-    """Send widget chat card, store binding in database, and return sent Message."""
+    """
+    Send widget chat card, store binding in database, and return sent Message.
+    Supports both direct Bot.send_message(chat_id, ...) and target_message.answer(...) calling conventions.
+    """
+    if target_message is not None:
+        if bot is None:
+            bot = target_message.bot
+        if chat_id is None:
+            chat_id = target_message.chat.id
+        if user_id is None and target_message.from_user:
+            user_id = target_message.from_user.id
+
+    if bot is None or chat_id is None:
+        raise ValueError("Either target_message or both bot and chat_id must be provided to send_widget_card")
+
+    if user_id is None:
+        user_id = chat_id
+
+    # Ensure user exists in database to satisfy foreign key constraints
+    existing_user = await users_repo.get_user(user_id)
+    if not existing_user:
+        await users_repo.create_or_update_user(
+            user_id=user_id,
+            username="",
+            utc_offset=utc_offset,
+            checkin_time="21:00",
+        )
+
+    if local_date is None or local_weekday is None:
+        now_utc = datetime.now(timezone.utc)
+        local_now = now_utc + timedelta(hours=utc_offset)
+        if local_date is None:
+            local_date = local_now.strftime("%Y-%m-%d")
+        if local_weekday is None:
+            local_weekday = local_now.isoweekday()
+
     wid = secrets.token_urlsafe(9)
     text, kb = await build_chat_card(
         user_id=user_id,
@@ -369,11 +408,16 @@ async def send_widget_card(
         utc_offset=utc_offset,
     )
 
-    sent = await target_message.answer(text, reply_markup=kb, parse_mode="HTML")
+    sent = await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
     await widgets_repo.save_widget_message(
         wid=wid,
         user_id=user_id,
-        chat_id=sent.chat.id,
+        chat_id=chat_id,
         message_id=sent.message_id,
         view_type=view,
     )
