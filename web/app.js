@@ -100,6 +100,11 @@
 
   // Unified API Fetch wrapper
   async function apiFetch(url, options = {}) {
+    let finalUrl = url;
+    if (state.isDev && !finalUrl.includes("dev=1")) {
+      finalUrl += (finalUrl.includes("?") ? "&" : "?") + "dev=1";
+    }
+
     const headers = Object.assign(
       {
         "Content-Type": "application/json",
@@ -113,7 +118,7 @@
     const config = Object.assign({}, options, { headers });
 
     try {
-      const response = await fetch(url, config);
+      const response = await fetch(finalUrl, config);
       const data = await response.json();
 
       if (!response.ok || !data.ok) {

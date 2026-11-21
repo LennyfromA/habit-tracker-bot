@@ -116,6 +116,7 @@ async def telegram_auth_middleware(
         # Development / browser preview mode
         user_id = 1
         username = "preview_user"
+        tg_user = {"id": 1, "first_name": "Preview", "username": username}
     else:
         bot_token = request.app.get("bot_token") or settings.BOT_TOKEN
         max_age = request.app.get("auth_max_age") or settings.WEBAPP_AUTH_MAX_AGE
