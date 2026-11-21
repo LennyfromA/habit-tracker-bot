@@ -40,6 +40,7 @@
 
     const params = new URLSearchParams(window.location.search);
     state.wid = params.get("wid") || "";
+    state.isDev = params.get("dev") === "1" || params.get("preview") === "1";
     const viewParam = params.get("view") || "habits";
 
     if (viewParam === "checkin") {
@@ -104,6 +105,7 @@
         "Content-Type": "application/json",
         "X-Telegram-Init-Data": tg?.initData || "",
         "X-Widget-Id": state.wid || "",
+        ...(state.isDev ? { "X-Dev-Preview": "1" } : {}),
       },
       options.headers || {}
     );

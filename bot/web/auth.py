@@ -104,32 +104,38 @@ async def telegram_auth_middleware(
     if not request.path.startswith("/api/"):
         return await handler(request)
 
+    dev_mode = request.headers.get("X-Dev-Preview") == "1" or request.query.get("dev") == "1"
     init_data = request.headers.get("X-Telegram-Init-Data") or request.query.get("init_data")
-    if not init_data:
+    if not init_data and not dev_mode:
         return web.json_response(
             {"ok": False, "error": "Missing X-Telegram-Init-Data authorization header"},
             status=401,
         )
 
-    bot_token = request.app.get("bot_token") or settings.BOT_TOKEN
-    max_age = request.app.get("auth_max_age") or settings.WEBAPP_AUTH_MAX_AGE
+    if dev_mode and not init_data:
+        # Development / browser preview mode
+        user_id = 1
+        username = "preview_user"
+    else:
+        bot_token = request.app.get("bot_token") or settings.BOT_TOKEN
+        max_age = request.app.get("auth_max_age") or settings.WEBAPP_AUTH_MAX_AGE
 
-    try:
-        validated = validate_telegram_init_data(
-            init_data=init_data,
-            bot_token=bot_token,
-            max_age_seconds=max_age,
-        )
-    except InitDataAuthError as e:
-        logger.warning("Telegram WebApp auth failure on %s: %s", request.path, e)
-        return web.json_response({"ok": False, "error": str(e)}, status=401)
-    except Exception as e:
-        logger.error("Unexpected error validating initData: %s", e)
-        return web.json_response({"ok": False, "error": "Authentication processing error"}, status=401)
+        try:
+            validated = validate_telegram_init_data(
+                init_data=init_data,
+                bot_token=bot_token,
+                max_age_seconds=max_age,
+            )
+        except InitDataAuthError as e:
+            logger.warning("Telegram WebApp auth failure on %s: %s", request.path, e)
+            return web.json_response({"ok": False, "error": str(e)}, status=401)
+        except Exception as e:
+            logger.error("Unexpected error validating initData: %s", e)
+            return web.json_response({"ok": False, "error": "Authentication processing error"}, status=401)
 
-    tg_user = validated["user"]
-    user_id = tg_user["id"]
-    username = tg_user.get("username")
+        tg_user = validated["user"]
+        user_id = tg_user["id"]
+        username = tg_user.get("username")
 
     # Fetch user from DB or register with defaults
     user = await users_repo.get_user(user_id)
