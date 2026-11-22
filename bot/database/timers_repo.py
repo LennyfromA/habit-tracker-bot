@@ -8,23 +8,35 @@ from bot.database.db import get_db
 
 async def create_or_replace_timer(
     user_id: int,
-    habit_id: int,
-    total_target_seconds: int,
-    message_id: int,
-    chat_id: int,
+    habit_id: Optional[int] = None,
+    total_target_seconds: int = 1500,
+    message_id: int = 0,
+    chat_id: int = 0,
     started_at: Optional[int] = None,
+    task_id: Optional[int] = None,
 ) -> None:
-    """Save a new active timer, replacing any previous timer for this user."""
+    """Save a new active timer, replacing any previous timer for this user.
+    Enforces XOR: exactly one of habit_id or task_id must be provided.
+    """
+    if isinstance(habit_id, dict):
+        habit_id = habit_id.get("id")
+    if isinstance(task_id, dict):
+        task_id = task_id.get("id")
+
+    if (habit_id is None and task_id is None) or (habit_id is not None and task_id is not None):
+        raise ValueError("Exactly one of habit_id or task_id must be provided to create_or_replace_timer")
+
     start_ts = started_at if started_at is not None else int(time.time())
     async with get_db() as db:
         query = """
         INSERT INTO active_timers (
-            user_id, habit_id, started_at, total_target_seconds,
+            user_id, habit_id, task_id, started_at, total_target_seconds,
             elapsed_before_pause, is_paused, message_id, chat_id
         )
-        VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             habit_id = excluded.habit_id,
+            task_id = excluded.task_id,
             started_at = excluded.started_at,
             total_target_seconds = excluded.total_target_seconds,
             elapsed_before_pause = 0,
@@ -34,28 +46,32 @@ async def create_or_replace_timer(
         """
         await db.execute(
             query,
-            (user_id, habit_id, start_ts, total_target_seconds, message_id, chat_id),
+            (user_id, habit_id, task_id, start_ts, total_target_seconds, message_id, chat_id),
         )
         await db.commit()
 
 
 async def get_timer(user_id: int) -> Optional[Dict[str, Any]]:
-    """Retrieve active timer for a user including habit details."""
+    """Retrieve active timer for a user including habit or task details."""
     async with get_db() as db:
         query = """
         SELECT
             t.user_id,
             t.habit_id,
+            t.task_id,
             t.started_at,
             t.total_target_seconds,
             t.elapsed_before_pause,
             t.is_paused,
             t.message_id,
             t.chat_id,
-            h.name AS habit_name,
-            h.target_minutes
+            CASE WHEN t.habit_id IS NOT NULL THEN 'habit' ELSE 'task' END AS target_type,
+            COALESCE(h.name, tk.title) AS target_name,
+            COALESCE(h.name, tk.title) AS habit_name,
+            COALESCE(h.target_minutes, tk.estimated_minutes, 25) AS target_minutes
         FROM active_timers t
-        JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN tasks tk ON tk.id = t.task_id
         WHERE t.user_id = ?;
         """
         async with db.execute(query, (user_id,)) as cursor:
@@ -127,16 +143,20 @@ async def delete_timer(user_id: int) -> Optional[Dict[str, Any]]:
         SELECT
             t.user_id,
             t.habit_id,
+            t.task_id,
             t.started_at,
             t.total_target_seconds,
             t.elapsed_before_pause,
             t.is_paused,
             t.message_id,
             t.chat_id,
-            h.name AS habit_name,
-            h.target_minutes
+            CASE WHEN t.habit_id IS NOT NULL THEN 'habit' ELSE 'task' END AS target_type,
+            COALESCE(h.name, tk.title) AS target_name,
+            COALESCE(h.name, tk.title) AS habit_name,
+            COALESCE(h.target_minutes, tk.estimated_minutes, 25) AS target_minutes
         FROM active_timers t
-        JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN tasks tk ON tk.id = t.task_id
         WHERE t.user_id = ?;
         """
         async with db.execute(select_query, (user_id,)) as cursor:
@@ -162,16 +182,20 @@ async def get_all_running_timers() -> List[Dict[str, Any]]:
         SELECT
             t.user_id,
             t.habit_id,
+            t.task_id,
             t.started_at,
             t.total_target_seconds,
             t.elapsed_before_pause,
             t.is_paused,
             t.message_id,
             t.chat_id,
-            h.name AS habit_name,
-            h.target_minutes
+            CASE WHEN t.habit_id IS NOT NULL THEN 'habit' ELSE 'task' END AS target_type,
+            COALESCE(h.name, tk.title) AS target_name,
+            COALESCE(h.name, tk.title) AS habit_name,
+            COALESCE(h.target_minutes, tk.estimated_minutes, 25) AS target_minutes
         FROM active_timers t
-        JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN habits h ON h.id = t.habit_id
+        LEFT JOIN tasks tk ON tk.id = t.task_id
         WHERE t.is_paused = 0;
         """
         async with db.execute(query) as cursor:

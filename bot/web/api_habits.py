@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from aiohttp import web
 
-from bot.database import habits_repo, timers_repo, widgets_repo
+from bot.database import habits_repo, tasks_repo, timers_repo, widgets_repo
 from bot.services.widget_launcher import sync_widget_message
 from bot.utils.formatting import calculate_timer_spent_seconds
 
@@ -296,7 +296,7 @@ async def api_freeze_habit(request: web.Request) -> web.Response:
 
 @routes.post("/api/timer/start")
 async def api_timer_start(request: web.Request) -> web.Response:
-    """Start or replace focus session timer."""
+    """Start or replace focus session timer (for either habit or task)."""
     auth: Dict[str, Any] = request["auth"]
     user_id: int = auth["user_id"]
     wid: Optional[str] = request.get("wid")
@@ -304,13 +304,13 @@ async def api_timer_start(request: web.Request) -> web.Response:
 
     try:
         data = await request.json()
-        habit_id = int(data.get("habit_id"))
+        habit_id = data.get("habit_id")
+        task_id = data.get("task_id")
     except Exception:
-        return web.json_response({"ok": False, "error": "habit_id is required"}, status=400)
+        return web.json_response({"ok": False, "error": "Invalid request body"}, status=400)
 
-    habit = await habits_repo.get_habit_by_id(habit_id)
-    if not habit or habit["user_id"] != user_id:
-        return web.json_response({"ok": False, "error": "Привычка не найдена"}, status=404)
+    if not habit_id and not task_id:
+        return web.json_response({"ok": False, "error": "habit_id or task_id is required"}, status=400)
 
     active = await timers_repo.get_timer(user_id)
     if active:
@@ -318,9 +318,6 @@ async def api_timer_start(request: web.Request) -> web.Response:
             {"ok": False, "error": "Таймер уже запущен. Завершите или остановите текущий таймер."},
             status=409,
         )
-
-    target_minutes = habit.get("target_minutes", 30) or 30
-    total_target_seconds = target_minutes * 60
 
     # Retrieve widget card message coordinates if wid is provided
     chat_id = user_id
@@ -331,14 +328,38 @@ async def api_timer_start(request: web.Request) -> web.Response:
             chat_id = w_rec["chat_id"]
             msg_id = w_rec["message_id"]
 
-    await timers_repo.create_or_replace_timer(
-        user_id=user_id,
-        habit_id=habit_id,
-        total_target_seconds=total_target_seconds,
-        message_id=msg_id,
-        chat_id=chat_id,
-        started_at=int(time.time()),
-    )
+    if task_id:
+        task_id = int(task_id)
+        task = await tasks_repo.get_task_by_id(task_id, user_id)
+        if not task:
+            return web.json_response({"ok": False, "error": "Задача не найдена"}, status=404)
+        target_minutes = int(data.get("duration_minutes") or task.get("estimated_minutes") or 25)
+        total_target_seconds = target_minutes * 60
+
+        await timers_repo.create_or_replace_timer(
+            user_id=user_id,
+            task_id=task_id,
+            total_target_seconds=total_target_seconds,
+            message_id=msg_id,
+            chat_id=chat_id,
+            started_at=int(time.time()),
+        )
+    else:
+        habit_id = int(habit_id)
+        habit = await habits_repo.get_habit_by_id(habit_id)
+        if not habit or habit["user_id"] != user_id:
+            return web.json_response({"ok": False, "error": "Привычка не найдена"}, status=404)
+        target_minutes = habit.get("target_minutes", 30) or 30
+        total_target_seconds = target_minutes * 60
+
+        await timers_repo.create_or_replace_timer(
+            user_id=user_id,
+            habit_id=habit_id,
+            total_target_seconds=total_target_seconds,
+            message_id=msg_id,
+            chat_id=chat_id,
+            started_at=int(time.time()),
+        )
 
     timer = await timers_repo.get_timer(user_id)
 
@@ -424,6 +445,26 @@ async def api_timer_stop(request: web.Request) -> web.Response:
     actual_minutes = round(spent_seconds / 60)
     if spent_seconds >= 30 and actual_minutes == 0:
         actual_minutes = 1
+
+    # Check if timer was for a task
+    if timer.get("task_id") or timer.get("target_type") == "task":
+        task_id = timer["task_id"]
+        task_name = timer.get("target_name") or timer.get("habit_name", "")
+        if actual_minutes > 0:
+            await tasks_repo.add_task_spent_minutes(task_id, actual_minutes)
+        summary = {
+            "target_type": "task",
+            "task_id": task_id,
+            "task_name": task_name,
+            "habit_name": task_name,
+            "actual_minutes": actual_minutes,
+            "target_minutes": timer.get("target_minutes", 25),
+            "is_completed": False,
+        }
+        synced = False
+        if bot:
+            synced = await sync_widget_message(bot, user_id, wid, "timer")
+        return web.json_response({"ok": True, "data": summary, "synced": synced})
 
     habit_id = timer["habit_id"]
     habit_name = timer.get("habit_name", "")

@@ -9,10 +9,11 @@
   // Global Application State
   const state = {
     bootstrap: null,
-    activeTab: "habits",
+    activeTab: "tasks",
     isCheckinMode: false,
     wid: "",
     timerInterval: null,
+    floatingTimerInterval: null,
     searchTimeout: null,
     expandedHabitId: null,
     editingHabit: null,
@@ -25,6 +26,14 @@
     statsMetric: "focus", // 'focus', 'habits', 'calories', 'water', 'weight'
     statsCache: {},
     isLoadingStats: false,
+    // Task Tracker state
+    tasksFilter: "today", // 'today', 'inbox', 'all', or list_id
+    tasksData: [],
+    expandedTasks: new Set(),
+    quickTaskDate: "today", // 'today', 'tomorrow', 'none'
+    quickTaskEstimate: null, // 15, 25, 45, 60
+    quickTaskListId: null,
+    autoOpenFocusOverlay: false,
   };
 
   const tg = window.Telegram?.WebApp;
@@ -46,15 +55,18 @@
     state.wid = params.get("wid") || "";
     // Automatically enable preview mode if opened in a regular browser outside Telegram
     state.isDev = params.get("dev") === "1" || params.get("preview") === "1" || !tg?.initData;
-    const viewParam = params.get("view") || "habits";
+    const viewParam = params.get("view") || "tasks";
 
     if (viewParam === "checkin") {
       state.isCheckinMode = true;
       state.activeTab = "habits";
-    } else if (["habits", "timer", "health", "stats", "settings"].includes(viewParam)) {
+    } else if (["tasks", "habits", "health", "stats", "settings"].includes(viewParam)) {
       state.activeTab = viewParam;
+    } else if (viewParam === "timer") {
+      state.activeTab = "tasks";
+      state.autoOpenFocusOverlay = true;
     } else {
-      state.activeTab = "habits";
+      state.activeTab = "tasks";
     }
   }
 
@@ -148,6 +160,7 @@
       const res = await apiFetch("/api/bootstrap");
       state.bootstrap = res.data;
       updateHeader();
+      updateFloatingFocusBar();
       renderCurrentView();
     } catch (err) {
       const appView = document.getElementById("app-view");
@@ -173,14 +186,14 @@
     if (!titleEl || !dateEl) return;
 
     const titles = {
+      tasks: "Задачи",
       habits: state.isCheckinMode ? "Вечерний чек-ин" : "Мои привычки",
-      timer: "Фокус-сессия",
       health: "Здоровье и КБЖУ",
       stats: `Итоги (${state.statsPeriod || 7} дней)`,
       settings: "Настройки",
     };
 
-    titleEl.textContent = titles[state.activeTab] || "Привычки";
+    titleEl.textContent = titles[state.activeTab] || "Задачи";
 
     if (state.bootstrap) {
       dateEl.textContent = `${state.bootstrap.local_date}`;
@@ -191,6 +204,7 @@
   function setupTabs() {
     const tabs = document.querySelectorAll(".nav-btn");
     tabs.forEach((tab) => {
+      tab.classList.toggle("active", tab.dataset.tab === state.activeTab);
       tab.addEventListener("click", () => {
         const target = tab.dataset.tab;
         if (target === state.activeTab && !state.isCheckinMode) return;
@@ -211,10 +225,10 @@
     const appView = document.getElementById("app-view");
     if (!appView || !state.bootstrap) return;
 
-    if (state.activeTab === "habits") {
+    if (state.activeTab === "tasks") {
+      renderTasksView(appView);
+    } else if (state.activeTab === "habits") {
       renderHabitsView(appView);
-    } else if (state.activeTab === "timer") {
-      renderTimerView(appView);
     } else if (state.activeTab === "health") {
       renderHealthView(appView);
     } else if (state.activeTab === "stats") {
@@ -225,7 +239,604 @@
   }
 
   // =========================================================================
-  // 1. HABITS VIEW
+  // 0. FLOATING FOCUS BAR & FOCUS OVERLAY
+  // =========================================================================
+  function updateFloatingFocusBar() {
+    const bar = document.getElementById("floating-focus-bar");
+    if (!bar) return;
+
+    const timer = state.bootstrap?.active_timer;
+    if (!timer) {
+      bar.classList.add("hidden");
+      clearInterval(state.floatingTimerInterval);
+      state.floatingTimerInterval = null;
+      document.getElementById("focus-overlay")?.classList.add("hidden");
+      return;
+    }
+
+    bar.classList.remove("hidden");
+    const titleEl = document.getElementById("focus-bar-title");
+    const subEl = document.getElementById("focus-bar-sub");
+    const dotEl = document.getElementById("focus-bar-dot");
+    const timeEl = document.getElementById("focus-bar-time");
+    const pauseBtn = document.getElementById("focus-bar-pause-btn");
+
+    const targetName = timer.target_name || timer.habit_name || "Фокус-сессия";
+    const targetType = timer.target_type === "task" ? "📌 Задача" : "🎯 Привычка";
+    const statusText = timer.is_paused ? "Пауза" : "В процессе";
+
+    if (titleEl) titleEl.textContent = targetName;
+    if (subEl) subEl.textContent = `${targetType} · ${statusText}`;
+    if (dotEl) dotEl.classList.toggle("paused", Boolean(timer.is_paused));
+    if (pauseBtn) pauseBtn.textContent = timer.is_paused ? "▶️" : "⏸";
+
+    clearInterval(state.floatingTimerInterval);
+    function tick() {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const elapsed = timer.is_paused
+        ? (timer.elapsed_before_pause || 0)
+        : (timer.elapsed_before_pause || 0) + Math.max(0, nowSec - timer.started_at);
+      const remaining = Math.max(0, timer.total_target_seconds - elapsed);
+      const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
+      const ss = String(remaining % 60).padStart(2, "0");
+      const timeStr = `${mm}:${ss}`;
+
+      if (timeEl) timeEl.textContent = timeStr;
+      const overlayTimer = document.getElementById("focus-overlay-timer");
+      if (overlayTimer) overlayTimer.textContent = timeStr;
+
+      if (remaining <= 0 && !timer.is_paused) {
+        clearInterval(state.floatingTimerInterval);
+        loadBootstrap();
+      }
+    }
+    tick();
+    if (!timer.is_paused) {
+      state.floatingTimerInterval = setInterval(tick, 1000);
+    }
+
+    if (state.autoOpenFocusOverlay) {
+      state.autoOpenFocusOverlay = false;
+      openFocusOverlay();
+    }
+  }
+
+  function openFocusOverlay() {
+    const overlay = document.getElementById("focus-overlay");
+    if (!overlay) return;
+    const timer = state.bootstrap?.active_timer;
+    if (!timer) return;
+
+    haptic("light");
+    overlay.classList.remove("hidden");
+    const titleEl = document.getElementById("focus-overlay-title");
+    const badgeEl = document.getElementById("focus-overlay-badge");
+    const metaEl = document.getElementById("focus-overlay-meta");
+    const pauseCtrl = document.getElementById("focus-ctrl-pause");
+
+    if (titleEl) titleEl.textContent = timer.target_name || timer.habit_name || "Фокус";
+    if (badgeEl) badgeEl.textContent = timer.target_type === "task" ? "Задача" : "Привычка";
+    if (metaEl) metaEl.textContent = `Цель: ${Math.round(timer.total_target_seconds / 60)} мин`;
+    if (pauseCtrl) pauseCtrl.textContent = timer.is_paused ? "▶️ Продолжить" : "⏸ Пауза";
+  }
+
+  function closeFocusOverlay() {
+    document.getElementById("focus-overlay")?.classList.add("hidden");
+  }
+
+  function setupFloatingFocusBarEvents() {
+    document.getElementById("focus-bar-trigger")?.addEventListener("click", () => {
+      openFocusOverlay();
+    });
+
+    document.getElementById("focus-bar-pause-btn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      haptic("medium");
+      const timer = state.bootstrap?.active_timer;
+      if (!timer) return;
+      try {
+        const endpoint = timer.is_paused ? "/api/timer/resume" : "/api/timer/pause";
+        await apiFetch(endpoint, { method: "POST" });
+        await loadBootstrap();
+      } catch (_) {}
+    });
+
+    document.getElementById("focus-bar-stop-btn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      haptic("warning");
+      await handleStopTimer();
+    });
+
+    document.getElementById("focus-overlay-dismiss-btn")?.addEventListener("click", closeFocusOverlay);
+    document.getElementById("focus-overlay-close")?.addEventListener("click", closeFocusOverlay);
+
+    document.getElementById("focus-ctrl-pause")?.addEventListener("click", async () => {
+      haptic("medium");
+      const timer = state.bootstrap?.active_timer;
+      if (!timer) return;
+      try {
+        const endpoint = timer.is_paused ? "/api/timer/resume" : "/api/timer/pause";
+        await apiFetch(endpoint, { method: "POST" });
+        await loadBootstrap();
+      } catch (_) {}
+    });
+
+    document.getElementById("focus-ctrl-add10")?.addEventListener("click", async () => {
+      haptic("light");
+      try {
+        await apiFetch("/api/timer/add-10", { method: "POST" });
+        showToast("+10 минут добавлено ⏱");
+        await loadBootstrap();
+      } catch (_) {}
+    });
+
+    document.getElementById("focus-ctrl-stop")?.addEventListener("click", async () => {
+      haptic("warning");
+      await handleStopTimer();
+    });
+  }
+
+  async function handleStopTimer() {
+    closeFocusOverlay();
+    try {
+      const res = await apiFetch("/api/timer/stop", { method: "POST" });
+      if (res.data) {
+        if (res.data.target_type === "task") {
+          showToast(`Фокус завершен! +${res.data.actual_minutes} мин. ⏱`);
+          if (confirm(`Сессия по задаче «${res.data.task_name}» завершена (${res.data.actual_minutes} мин).\nОтметить задачу выполненной?`)) {
+            await apiFetch(`/api/tasks/${res.data.task_id}/toggle`, { method: "POST" });
+          }
+        } else {
+          state.timerReflectionData = res.data;
+          state.activeTab = "habits";
+          document.querySelectorAll(".nav-btn").forEach((t) => t.classList.toggle("active", t.dataset.tab === "habits"));
+          updateHeader();
+          renderCurrentView();
+        }
+      }
+      await loadBootstrap();
+    } catch (_) {}
+  }
+
+  // =========================================================================
+  // 1. TASKS VIEW (Todoist-Style with Subtasks & Lists)
+  // =========================================================================
+  async function loadTasksData() {
+    try {
+      let url = "/api/tasks";
+      if (typeof state.tasksFilter === "number") {
+        url += `?list_id=${state.tasksFilter}`;
+      } else {
+        url += `?view=${state.tasksFilter}`;
+      }
+      const res = await apiFetch(url);
+      if (res.data) {
+        state.tasksData = res.data.tasks || [];
+        if (res.data.counts) {
+          state.tasksCounts = res.data.counts;
+        }
+      }
+    } catch (_) {
+      state.tasksData = [];
+    }
+  }
+
+  async function renderTasksView(container) {
+    updateHeader();
+
+    const lists = state.bootstrap?.task_lists || [];
+    const counts = state.tasksCounts || state.bootstrap?.tasks_counts || {};
+    const todayTasks = state.bootstrap?.tasks_today || [];
+
+    const isToday = state.tasksFilter === "today";
+    const isAll = state.tasksFilter === "all";
+    const isInbox = state.tasksFilter === "inbox";
+
+    let chipsHtml = `
+      <div class="task-chips-bar">
+        <button type="button" class="task-chip ${isToday ? "active" : ""}" data-filter="today">
+          📅 Сегодня <span class="task-chip-count">(${counts.today_total !== undefined ? counts.today_total : todayTasks.length})</span>
+        </button>
+        <button type="button" class="task-chip ${isAll ? "active" : ""}" data-filter="all">
+          📑 Все <span class="task-chip-count">(${counts.all_active || 0})</span>
+        </button>
+        <button type="button" class="task-chip ${isInbox ? "active" : ""}" data-filter="inbox">
+          📥 Входящие
+        </button>
+    `;
+
+    lists.forEach((l) => {
+      if (l.is_inbox) return;
+      const isActive = state.tasksFilter === l.id;
+      chipsHtml += `
+        <button type="button" class="task-chip ${isActive ? "active" : ""}" data-filter="${l.id}">
+          ${escapeHtml(l.icon || "📁")} ${escapeHtml(l.name)}
+        </button>
+      `;
+    });
+
+    chipsHtml += `
+        <button type="button" class="task-chip" id="btn-create-list" style="border-style:dashed;">
+          ➕ Список
+        </button>
+      </div>
+    `;
+
+    let overdueBannerHtml = "";
+    const overdueCount = counts.overdue || 0;
+    if (isToday && overdueCount > 0) {
+      overdueBannerHtml = `
+        <div class="task-overdue-banner">
+          <div class="task-overdue-text">
+            ⚠️ <b>Просрочено задач: ${overdueCount}</b>
+          </div>
+          <button type="button" class="btn-defer-inline" id="btn-defer-overdue-tasks">Перенести на сегодня</button>
+        </div>
+      `;
+    }
+
+    const dateLabels = { today: "📅 Сегодня", tomorrow: "📅 Завтра", none: "📅 Без даты" };
+    const estLabels = { 15: "⏱ 15м", 25: "⏱ 25м", 45: "⏱ 45м", 60: "⏱ 1ч", null: "⏱ Таймер" };
+
+    const quickAddHtml = `
+      <div class="task-quick-add-box">
+        <div class="task-input-row">
+          <input type="text" class="task-quick-input" id="task-quick-title-input" placeholder="+ Новая задача (например: Позвонить врачу завтра 14:00 #здоровье 25m)" autocomplete="off">
+          <button type="button" class="btn-add-task" id="btn-submit-quick-task" title="Добавить">+</button>
+        </div>
+        <div class="task-add-chips-row">
+          <button type="button" class="task-add-chip-btn ${state.quickTaskDate !== "none" ? "selected" : ""}" id="chip-task-date">
+            ${dateLabels[state.quickTaskDate] || "📅 Сегодня"}
+          </button>
+          <button type="button" class="task-add-chip-btn ${state.quickTaskEstimate ? "selected" : ""}" id="chip-task-est">
+            ${estLabels[state.quickTaskEstimate] || "⏱ Таймер"}
+          </button>
+          <select class="form-input" id="quick-task-list-select" style="padding: 3px 6px; font-size: 0.75rem; border-radius: var(--radius-full); width: auto; max-width: 140px; height: 26px;">
+            <option value="">📥 Входящие</option>
+            ${lists.filter(l => !l.is_inbox).map(l => `<option value="${l.id}" ${state.quickTaskListId === l.id ? "selected" : ""}>${escapeHtml(l.icon || "📁")} ${escapeHtml(l.name)}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+    `;
+
+    let tasksToRender = state.tasksData;
+    if (isToday && (!state.tasksData || state.tasksData.length === 0)) {
+      tasksToRender = todayTasks;
+    }
+
+    let tasksListHtml = "";
+    if (!tasksToRender || tasksToRender.length === 0) {
+      tasksListHtml = `
+        <div style="text-align:center; padding: 40px 16px; color: var(--hint);">
+          <span style="font-size: 2.2rem; display:block; margin-bottom:8px;">🎉</span>
+          <p style="font-weight:600; color:var(--text);">Все задачи выполнены!</p>
+          <p style="font-size:0.8rem; margin-top:4px;">Добавьте новую задачу в поле выше или через бота /t</p>
+        </div>
+      `;
+    } else {
+      tasksListHtml = '<div class="task-items-list">';
+      tasksToRender.forEach((t) => {
+        const isComp = Boolean(t.is_completed);
+        const subtasks = t.subtasks || [];
+        const isExpanded = state.expandedTasks.has(t.id);
+        const subCompletedCount = subtasks.filter((s) => s.is_completed).length;
+
+        let metaHtml = "";
+        if (t.due_date) {
+          const isOverdue = Boolean(t.is_overdue) && !isComp;
+          const isDueToday = t.due_date === state.bootstrap.local_date;
+          const cls = isOverdue ? "overdue" : (isDueToday ? "today" : "");
+          const dLabel = isDueToday ? "Сегодня" : t.due_date;
+          metaHtml += `<span class="task-meta-pill ${cls}">📅 ${escapeHtml(dLabel)}</span>`;
+        }
+        if (t.due_time) {
+          metaHtml += `<span class="task-meta-pill">⏰ ${escapeHtml(t.due_time)}</span>`;
+        }
+        if (t.estimated_minutes) {
+          metaHtml += `<span class="task-meta-pill">⏱ ${t.estimated_minutes}м</span>`;
+        }
+        if (t.spent_minutes > 0) {
+          metaHtml += `<span class="task-meta-pill" style="color:var(--success);">🔥 ${t.spent_minutes}м</span>`;
+        }
+        if (t.list_name && !t.is_inbox) {
+          metaHtml += `<span class="task-meta-pill">${escapeHtml(t.list_icon || "📁")} ${escapeHtml(t.list_name)}</span>`;
+        }
+        if (t.recurrence && t.recurrence !== "none") {
+          metaHtml += `<span class="task-meta-pill">🔄</span>`;
+        }
+
+        let subtasksBadgeHtml = "";
+        if (subtasks.length > 0) {
+          subtasksBadgeHtml = `
+            <button type="button" class="task-subtasks-toggle" data-task-id="${t.id}">
+              ${isExpanded ? "▲" : "▼"} ${subCompletedCount}/${subtasks.length} подзадач
+            </button>
+          `;
+        } else {
+          subtasksBadgeHtml = `
+            <button type="button" class="task-subtasks-toggle" data-task-id="${t.id}" style="color:var(--hint); font-weight:normal;">
+              + подзадача
+            </button>
+          `;
+        }
+
+        let subtasksListHtml = "";
+        if (isExpanded) {
+          subtasksListHtml = `
+            <div class="task-subtasks-wrap" id="subtasks-wrap-${t.id}">
+              ${subtasks.map((s) => `
+                <div class="subtask-item-row">
+                  <span class="subtask-checkbox ${s.is_completed ? "checked" : ""}" data-subtask-id="${s.id}" data-task-id="${t.id}"></span>
+                  <span class="subtask-title-text ${s.is_completed ? "completed" : ""}">${escapeHtml(s.title)}</span>
+                  <button type="button" class="btn-subtask-del" data-subtask-del="${s.id}" data-task-id="${t.id}" title="Удалить">✕</button>
+                </div>
+              `).join("")}
+              <div class="subtask-add-row">
+                <input type="text" class="subtask-add-input" placeholder="+ Добавить подзадачу" data-subtask-add-input="${t.id}">
+              </div>
+            </div>
+          `;
+        }
+
+        tasksListHtml += `
+          <div class="task-card ${isComp ? "completed" : ""}" id="task-card-${t.id}">
+            <div class="task-main-row">
+              <span class="task-checkbox-custom ${isComp ? "checked" : ""}" data-task-toggle="${t.id}"></span>
+              <div class="task-details-col">
+                <div class="task-title-text">${escapeHtml(t.title)}</div>
+                <div class="task-meta-row">
+                  ${metaHtml}
+                  ${subtasksBadgeHtml}
+                </div>
+              </div>
+              <div class="task-actions-col">
+                ${!isComp ? `<button type="button" class="btn-task-focus" data-task-focus="${t.id}" title="Фокус-таймер">⏱ Фокус</button>` : ""}
+                <button type="button" class="btn-task-icon" data-task-del="${t.id}" title="Удалить задачу">🗑</button>
+              </div>
+            </div>
+            ${subtasksListHtml}
+          </div>
+        `;
+      });
+      tasksListHtml += '</div>';
+    }
+
+    container.innerHTML = `
+      ${chipsHtml}
+      ${overdueBannerHtml}
+      ${quickAddHtml}
+      ${tasksListHtml}
+    `;
+
+    setupTasksEvents(container);
+  }
+
+  function setupTasksEvents(container) {
+    // Filter chips
+    container.querySelectorAll(".task-chip[data-filter]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic("light");
+        const f = btn.dataset.filter;
+        state.tasksFilter = (f === "today" || f === "all" || f === "inbox") ? f : parseInt(f, 10);
+        await loadTasksData();
+        renderTasksView(container);
+      });
+    });
+
+    // Create custom list
+    document.getElementById("btn-create-list")?.addEventListener("click", async () => {
+      haptic("light");
+      const name = prompt("Введите название нового списка задач:");
+      if (!name || !name.trim()) return;
+      try {
+        await apiFetch("/api/task-lists", {
+          method: "POST",
+          body: JSON.stringify({ name: name.trim(), icon: "📁" }),
+        });
+        showToast("Список создан! 📁");
+        await loadBootstrap();
+      } catch (_) {}
+    });
+
+    // Defer overdue tasks
+    document.getElementById("btn-defer-overdue-tasks")?.addEventListener("click", async () => {
+      haptic("medium");
+      try {
+        const res = await apiFetch("/api/tasks/defer-today", { method: "POST" });
+        showToast(`Перенесено задач: ${res.deferred_count || 0} 📅`);
+        await loadBootstrap();
+        await loadTasksData();
+        renderTasksView(container);
+      } catch (_) {}
+    });
+
+    // Quick add chips
+    document.getElementById("chip-task-date")?.addEventListener("click", () => {
+      haptic("light");
+      const cycle = ["today", "tomorrow", "none"];
+      const nextIdx = (cycle.indexOf(state.quickTaskDate) + 1) % cycle.length;
+      state.quickTaskDate = cycle[nextIdx];
+      renderTasksView(container);
+    });
+
+    document.getElementById("chip-task-est")?.addEventListener("click", () => {
+      haptic("light");
+      const cycle = [null, 15, 25, 45, 60];
+      const nextIdx = (cycle.indexOf(state.quickTaskEstimate) + 1) % cycle.length;
+      state.quickTaskEstimate = cycle[nextIdx];
+      renderTasksView(container);
+    });
+
+    document.getElementById("quick-task-list-select")?.addEventListener("change", (e) => {
+      const val = e.target.value;
+      state.quickTaskListId = val ? parseInt(val, 10) : null;
+    });
+
+    // Quick task submit
+    async function submitQuickTask() {
+      const input = document.getElementById("task-quick-title-input");
+      const rawTitle = input?.value.trim();
+      if (!rawTitle) return;
+
+      haptic("medium");
+      const listSelect = document.getElementById("quick-task-list-select");
+      const listId = listSelect?.value ? parseInt(listSelect.value, 10) : state.quickTaskListId;
+
+      let dueDate = null;
+      if (state.quickTaskDate === "today") {
+        dueDate = state.bootstrap.local_date;
+      } else if (state.quickTaskDate === "tomorrow") {
+        const d = new Date(state.bootstrap.local_date);
+        d.setDate(d.getDate() + 1);
+        dueDate = d.toISOString().split("T")[0];
+      }
+
+      try {
+        await apiFetch("/api/tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            title: rawTitle,
+            list_id: listId,
+            due_date: dueDate,
+            estimated_minutes: state.quickTaskEstimate,
+          }),
+        });
+        showToast("Задача создана! ✅");
+        if (input) input.value = "";
+        await loadBootstrap();
+        await loadTasksData();
+        renderTasksView(container);
+      } catch (_) {}
+    }
+
+    document.getElementById("btn-submit-quick-task")?.addEventListener("click", submitQuickTask);
+    document.getElementById("task-quick-title-input")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        submitQuickTask();
+      }
+    });
+
+    // Toggle task complete
+    container.querySelectorAll("[data-task-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic("success");
+        const taskId = btn.dataset.taskToggle;
+        try {
+          const res = await apiFetch(`/api/tasks/${taskId}/toggle`, { method: "POST" });
+          if (res.data?.recurrence && res.data.recurrence !== "none") {
+            showToast("🔄 Задача перенесена на следующий цикл!");
+          }
+          await loadBootstrap();
+          await loadTasksData();
+          renderTasksView(container);
+        } catch (_) {}
+      });
+    });
+
+    // Start focus timer for task
+    container.querySelectorAll("[data-task-focus]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic("medium");
+        const taskId = parseInt(btn.dataset.taskFocus, 10);
+        try {
+          await apiFetch("/api/timer/start", {
+            method: "POST",
+            body: JSON.stringify({ task_id: taskId }),
+          });
+          showToast("⏱ Фокус-сессия запущена!");
+          await loadBootstrap();
+        } catch (_) {}
+      });
+    });
+
+    // Delete task
+    container.querySelectorAll("[data-task-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const taskId = btn.dataset.taskDel;
+        if (confirm("Удалить эту задачу?")) {
+          haptic("warning");
+          try {
+            await apiFetch(`/api/tasks/${taskId}`, { method: "DELETE" });
+            showToast("Задача удалена 🗑");
+            await loadBootstrap();
+            await loadTasksData();
+            renderTasksView(container);
+          } catch (_) {}
+        }
+      });
+    });
+
+    // Expand / collapse subtasks
+    container.querySelectorAll(".task-subtasks-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        haptic("light");
+        const taskId = parseInt(btn.dataset.taskId, 10);
+        if (state.expandedTasks.has(taskId)) {
+          state.expandedTasks.delete(taskId);
+        } else {
+          state.expandedTasks.add(taskId);
+        }
+        renderTasksView(container);
+      });
+    });
+
+    // Toggle subtask checkbox
+    container.querySelectorAll(".subtask-checkbox[data-subtask-id]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic("light");
+        const subId = btn.dataset.subtaskId;
+        const isChecked = btn.classList.contains("checked");
+        try {
+          await apiFetch(`/api/subtasks/${subId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ is_completed: !isChecked }),
+          });
+          await loadBootstrap();
+          await loadTasksData();
+          renderTasksView(container);
+        } catch (_) {}
+      });
+    });
+
+    // Delete subtask
+    container.querySelectorAll("[data-subtask-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        haptic("light");
+        const subId = btn.dataset.subtaskDel;
+        try {
+          await apiFetch(`/api/subtasks/${subId}`, { method: "DELETE" });
+          await loadBootstrap();
+          await loadTasksData();
+          renderTasksView(container);
+        } catch (_) {}
+      });
+    });
+
+    // Add subtask on Enter
+    container.querySelectorAll("[data-subtask-add-input]").forEach((inp) => {
+      inp.addEventListener("keydown", async (e) => {
+        if (e.key === "Enter") {
+          const val = inp.value.trim();
+          if (!val) return;
+          const taskId = inp.dataset.subtaskAddInput;
+          haptic("light");
+          try {
+            await apiFetch(`/api/tasks/${taskId}/subtasks`, {
+              method: "POST",
+              body: JSON.stringify({ title: val }),
+            });
+            inp.value = "";
+            await loadBootstrap();
+            await loadTasksData();
+            renderTasksView(container);
+          } catch (_) {}
+        }
+      });
+    });
+  }
+
+  // =========================================================================
+  // 2. HABITS VIEW
   // =========================================================================
   function renderHabitsView(container) {
     const b = state.bootstrap;
@@ -2037,6 +2648,7 @@
   document.addEventListener("DOMContentLoaded", () => {
     initTelegram();
     setupTabs();
+    setupFloatingFocusBarEvents();
     loadBootstrap();
   });
 })();

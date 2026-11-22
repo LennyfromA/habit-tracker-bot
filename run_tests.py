@@ -323,7 +323,7 @@ async def run_all_checks():
     main_kb = get_main_reply_keyboard()
     assert len(main_kb.keyboard) == 2
     assert main_kb.keyboard[0][0].text == "🍏 Здоровье"
-    assert main_kb.keyboard[0][1].text == "📋 Привычки"
+    assert main_kb.keyboard[0][1].text == "📋 План"
     assert main_kb.keyboard[1][0].text == "⚙️ Настройки"
 
     # Settings view

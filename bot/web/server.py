@@ -9,7 +9,7 @@ from aiogram import Bot
 from aiohttp import web
 
 from bot.config import settings
-from bot.web import api_dashboard, api_habits, api_health
+from bot.web import api_dashboard, api_habits, api_health, api_tasks
 from bot.web.auth import telegram_auth_middleware
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,7 @@ def create_web_app(bot: Bot, bot_token: Optional[str] = None) -> web.Application
 
     # API routes
     app.add_routes(api_dashboard.routes)
+    app.add_routes(api_tasks.routes)
     app.add_routes(api_habits.routes)
     app.add_routes(api_health.routes)
 

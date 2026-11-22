@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 
-from bot.database import habits_repo, users_repo
+from bot.database import habits_repo, tasks_repo, users_repo
 from bot.keyboards.reply import get_main_reply_keyboard
 from bot.services.chart_builder import build_weekly_stats_chart
 from bot.services.widget_launcher import is_widget_enabled, send_widget_card
@@ -94,10 +94,11 @@ async def render_export_view(target_message: Message, user_id: int, local_date: 
     start_date_str = start_dt.strftime("%Y-%m-%d")
 
     data = await habits_repo.get_export_data(user_id, start_date_str, local_date)
+    completed_tasks = await tasks_repo.get_completed_tasks_in_range(user_id, start_date_str, local_date)
 
-    if not data:
+    if not data and not completed_tasks:
         await target_message.answer(
-            "📁 У вас пока нет привычек для формирования отчета.",
+            "📁 У вас пока нет привычек или выполненных задач для формирования отчета.",
             reply_markup=get_main_reply_keyboard(),
         )
         return
@@ -149,6 +150,19 @@ async def render_export_view(target_message: Message, user_id: int, local_date: 
                         md_lines.append(f"- [ ] {day_str}: 0/{habit['target_minutes']} мин")
 
         md_lines.append("")  # Empty line between habits
+
+    if completed_tasks:
+        md_lines.append(f"## 📋 Выполненные задачи за неделю ({len(completed_tasks)} шт.)\n")
+        by_list: Dict[str, List[Dict[str, Any]]] = {}
+        for t in completed_tasks:
+            lname = f"{t.get('list_icon', '📁')} {t.get('list_name', 'Входящие')}"
+            by_list.setdefault(lname, []).append(t)
+        for lname, t_list in by_list.items():
+            md_lines.append(f"### {lname}")
+            for t in t_list:
+                spent_note = f" (фокус: {t['spent_minutes']} мин)" if t.get("spent_minutes") else ""
+                md_lines.append(f"- [x] {t['title']} — {t['completed_at']}{spent_note}")
+            md_lines.append("")
 
     md_content = "\n".join(md_lines).encode("utf-8")
     doc_file = BufferedInputFile(

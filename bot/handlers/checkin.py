@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.database import habits_repo, nutrition_repo, users_repo, water_repo
+from bot.database import habits_repo, nutrition_repo, tasks_repo, users_repo, water_repo
 from bot.keyboards.inline import get_checkin_dashboard_keyboard
 from bot.keyboards.reply import get_main_reply_keyboard
 from bot.services.widget_launcher import is_widget_enabled, send_widget_card
@@ -25,6 +25,7 @@ def format_checkin_text(
     nutrition_goals: Optional[Dict[str, Any]] = None,
     water_ml: int = 0,
     water_target: int = 2000,
+    tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Format check-in status message in HTML."""
     total_count = len(habits)
@@ -34,7 +35,7 @@ def format_checkin_text(
     lines = [
         "🌙 <b>Вечерний чек-ин продуктивности!</b>",
         f"📅 Дата: <code>{local_date}</code>",
-        f"📊 Итог дня: <b>{completed_count + frozen_count}/{total_count}</b> выполнено/заморожено\n",
+        f"📊 Привычки: <b>{completed_count + frozen_count}/{total_count}</b> выполнено/заморожено\n",
     ]
 
     for h in habits:
@@ -80,6 +81,14 @@ def format_checkin_text(
     if track_water and water_ml > 0:
         lines.append(f"💧 <b>Вода за сегодня:</b> {water_ml}/{water_target} мл")
 
+    if tasks is not None and len(tasks) > 0:
+        t_completed = sum(1 for t in tasks if t.get("is_completed"))
+        lines.append(f"\n📌 <b>Задачи на сегодня:</b> {t_completed}/{len(tasks)} закрыто")
+        open_tasks = [t for t in tasks if not t.get("is_completed")]
+        for ot in open_tasks[:5]:
+            time_part = f" ({ot['due_time']})" if ot.get("due_time") else ""
+            lines.append(f"▫️ {html.escape(ot['title'])}{time_part}")
+
     incomplete = [h for h in habits if not h.get("is_completed") and not h.get("is_frozen_today")]
     if incomplete:
         lines.append("\nНажмите на привычку, чтобы быстро отметить её выполнение:")
@@ -109,8 +118,10 @@ async def render_checkin_view(
     nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
     water_cur = await water_repo.get_daily_water(user_id, local_date)
     water_tgt = await water_repo.get_water_target(user_id)
-    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt)
-    kb = get_checkin_dashboard_keyboard(habits)
+    today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+    has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
+    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt, tasks=today_tasks)
+    kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
     await target_message.answer(text, reply_markup=kb)
 
 
@@ -182,8 +193,10 @@ async def cb_checkin_complete(
     nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
     water_cur = await water_repo.get_daily_water(user_id, local_date)
     water_tgt = await water_repo.get_water_target(user_id)
-    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt)
-    kb = get_checkin_dashboard_keyboard(habits)
+    today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+    has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
+    text = format_checkin_text(habits, local_date, nutr_summary, nutr_goals, water_cur, water_tgt, tasks=today_tasks)
+    kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
 
     try:
         await callback.message.edit_text(text, reply_markup=kb)

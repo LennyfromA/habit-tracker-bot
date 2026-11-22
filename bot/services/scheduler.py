@@ -12,7 +12,7 @@ from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from bot.database import habits_repo, nutrition_repo, timers_repo, users_repo, water_repo, widgets_repo
+from bot.database import habits_repo, nutrition_repo, tasks_repo, timers_repo, users_repo, water_repo, widgets_repo
 from bot.handlers.checkin import format_checkin_text
 from bot.keyboards.inline import get_checkin_dashboard_keyboard, get_habit_reminder_push_keyboard
 from bot.services.widget_launcher import is_widget_enabled, send_widget_push, sync_widget_message
@@ -53,6 +53,58 @@ async def check_active_timers(bot: Bot, storage: Optional[BaseStorage] = None) -
                 continue  # Timer was already stopped concurrently
 
             actual_minutes = max(1, round(elapsed / 60))
+
+            # Check if this timer was for a task
+            if deleted_timer.get("task_id") or deleted_timer.get("target_type") == "task":
+                task_id = deleted_timer["task_id"]
+                task_name = deleted_timer.get("target_name") or deleted_timer.get("habit_name") or "Задача"
+                escaped_task_name = html.escape(task_name)
+                await tasks_repo.add_task_spent_minutes(task_id, actual_minutes)
+
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=(
+                            f"✅ <b>Сессия завершена по таймеру!</b>\n\n"
+                            f"🎯 Задача: «{escaped_task_name}»\n"
+                            f"⏱ Засчитано: {actual_minutes} мин."
+                        ),
+                    )
+                except Exception as e:
+                    logger.debug("Could not edit task timer message %s: %s", message_id, e)
+
+                if is_widget_enabled():
+                    try:
+                        latest_w = await widgets_repo.get_latest_widget_message(user_id)
+                        if latest_w:
+                            await sync_widget_message(bot, user_id, latest_w["wid"], latest_w["view_type"])
+                    except Exception as e:
+                        logger.debug("Failed to sync widget message on task timer auto-completion: %s", e)
+
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✅ Отметить задачу выполненной",
+                                callback_data=f"task_rem_done:{task_id}",
+                            )
+                        ]
+                    ]
+                )
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔔 <b>Время вышло!</b> Фокус-сессия по задаче «{escaped_task_name}» успешно завершена!\n\n"
+                            f"⏱ Засчитано: +{actual_minutes} мин."
+                        ),
+                        reply_markup=kb,
+                        disable_notification=False,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to send task timer alert to user %s: %s", user_id, e)
+                continue
 
             # Fetch user to get timezone and local date
             user = await users_repo.get_user(user_id)
@@ -148,6 +200,8 @@ async def check_evening_checkins(bot: Bot) -> None:
                 nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
                 water_cur = await water_repo.get_daily_water(user_id, local_date)
                 water_tgt = await water_repo.get_water_target(user_id)
+                today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+                has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
 
                 checkin_text = format_checkin_text(
                     habits=habits,
@@ -156,8 +210,9 @@ async def check_evening_checkins(bot: Bot) -> None:
                     nutrition_goals=nutr_goals,
                     water_ml=water_cur,
                     water_target=water_tgt,
+                    tasks=today_tasks,
                 )
-                kb = get_checkin_dashboard_keyboard(habits)
+                kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
 
                 try:
                     if is_widget_enabled():
@@ -279,6 +334,7 @@ async def check_midnight_resets() -> None:
     cutoff_date = (now_utc - timedelta(days=14)).strftime("%Y-%m-%d")
     try:
         await habits_repo.cleanup_old_reminders_log(cutoff_date)
+        await tasks_repo.cleanup_old_task_reminders(cutoff_date)
         await widgets_repo.cleanup_old_widget_messages(days=30)
     except Exception as e:
         logger.debug("Failed to clean up old reminders log or widget messages: %s", e)
@@ -362,6 +418,52 @@ async def check_habit_reminders(bot: Bot) -> None:
                         await habits_repo.record_habit_reminder_sent(h["id"], user_id, local_date, rem_time)
 
 
+async def check_task_reminders(bot: Bot) -> None:
+    """Send due task reminder pushes to users with interactive action buttons."""
+    now_ts = int(time.time())
+    now_utc = datetime.now(timezone.utc)
+    users = await users_repo.get_all_users()
+
+    for user in users:
+        muted_until = user.get("notifications_muted_until", 0) or 0
+        if muted_until > now_ts or muted_until == 2147483647:
+            continue
+
+        user_id = user["user_id"]
+        offset = user.get("utc_offset", 3)
+        user_local_now = now_utc + timedelta(hours=offset)
+        local_date = user_local_now.strftime("%Y-%m-%d")
+        local_time = user_local_now.strftime("%H:%M")
+
+        candidates = await tasks_repo.get_due_task_reminders_candidates(user_id, local_date, local_time)
+        for task in candidates:
+            # Check if reminder was already sent for this time window
+            if await tasks_repo.was_task_reminder_sent(task["id"], local_date, local_time):
+                continue
+
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Готово", callback_data=f"task_rem_done:{task['id']}"),
+                        InlineKeyboardButton(text="📅 На завтра", callback_data=f"task_rem_tomorrow:{task['id']}"),
+                    ]
+                ]
+            )
+            dur_text = f" (~{task['estimated_minutes']} мин)" if task.get("estimated_minutes") else ""
+            list_badge = f"{task.get('list_icon', '📁')} {task.get('list_name', 'Входящие')}"
+            text = (
+                f"⏰ <b>Напоминание о задаче!</b>\n\n"
+                f"<b>«{html.escape(task['title'])}»</b>{dur_text}\n"
+                f"📂 {html.escape(list_badge)}"
+            )
+            try:
+                await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
+            except Exception as e:
+                logger.warning("Failed to send task reminder to %s: %s", user_id, e)
+
+            await tasks_repo.record_task_reminder_sent(task["id"], user_id, local_date, local_time)
+
+
 async def global_tick(bot: Bot, storage: Optional[BaseStorage] = None) -> None:
     """Tick executed every 60 seconds by APScheduler."""
     try:
@@ -383,6 +485,11 @@ async def global_tick(bot: Bot, storage: Optional[BaseStorage] = None) -> None:
         await check_habit_reminders(bot)
     except Exception as e:
         logger.error("Error in habit reminders: %s", e, exc_info=True)
+
+    try:
+        await check_task_reminders(bot)
+    except Exception as e:
+        logger.error("Error in task reminders: %s", e, exc_info=True)
 
     try:
         await check_midnight_resets()

@@ -11,7 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import settings
 from bot.database.db import init_db
-from bot.handlers import checkin, habits, nutrition, start, stats, timer
+from bot.handlers import checkin, habits, nutrition, start, stats, tasks, timer
 from bot.middlewares.user_check import UserCheckMiddleware
 from bot.services.scheduler import init_scheduler
 from bot.services.widget_launcher import is_widget_enabled
@@ -60,6 +60,7 @@ async def main() -> None:
 
     # 4. Include Routers
     dp.include_router(start.router)
+    dp.include_router(tasks.router)
     dp.include_router(habits.router)
     dp.include_router(timer.router)
     dp.include_router(checkin.router)

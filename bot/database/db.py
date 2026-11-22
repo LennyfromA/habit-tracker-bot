@@ -80,14 +80,17 @@ CREATE TABLE IF NOT EXISTS habit_snoozes (
 
 CREATE TABLE IF NOT EXISTS active_timers (
     user_id INTEGER PRIMARY KEY,
-    habit_id INTEGER NOT NULL,
+    habit_id INTEGER DEFAULT NULL,
+    task_id INTEGER DEFAULT NULL,
     started_at INTEGER NOT NULL, -- Unix timestamp (epoch seconds)
     total_target_seconds INTEGER NOT NULL,
     elapsed_before_pause INTEGER NOT NULL DEFAULT 0,
     is_paused INTEGER NOT NULL DEFAULT 0,
     message_id INTEGER NOT NULL,
     chat_id INTEGER NOT NULL,
-    FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE
+    FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE,
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    CHECK((habit_id IS NOT NULL AND task_id IS NULL) OR (habit_id IS NULL AND task_id IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS nutrition_goals (
@@ -165,7 +168,66 @@ CREATE TABLE IF NOT EXISTS widget_messages (
     FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS task_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    icon TEXT NOT NULL DEFAULT '📁',
+    is_inbox INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    UNIQUE(user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    list_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    notes TEXT DEFAULT NULL,
+    due_date TEXT DEFAULT NULL,                  -- YYYY-MM-DD (local user date)
+    due_time TEXT DEFAULT NULL,                  -- HH:MM (optional reminder time)
+    recurrence TEXT NOT NULL DEFAULT 'none',     -- 'none', 'daily', 'weekdays', 'weekly'
+    estimated_minutes INTEGER DEFAULT NULL,      -- optional focus estimate
+    spent_minutes INTEGER NOT NULL DEFAULT 0,    -- accumulated focus time
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT DEFAULT NULL,              -- YYYY-MM-DD (local user date)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY(list_id) REFERENCES task_lists(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_subtasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_reminders_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    reminded_date TEXT NOT NULL,
+    reminder_time TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    UNIQUE(task_id, reminded_date, reminder_time)
+);
+
 CREATE INDEX IF NOT EXISTS idx_widget_messages_user ON widget_messages(user_id, view_type);
+CREATE INDEX IF NOT EXISTS idx_task_lists_user ON task_lists(user_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_due ON tasks(user_id, is_completed, due_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_list ON tasks(user_id, list_id, is_completed);
+CREATE INDEX IF NOT EXISTS idx_tasks_completed_at ON tasks(user_id, completed_at);
+CREATE INDEX IF NOT EXISTS idx_task_subtasks_task ON task_subtasks(task_id, sort_order);
 
 CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);
 CREATE INDEX IF NOT EXISTS idx_habit_logs_user_date ON habit_logs(user_id, logged_date);
@@ -231,6 +293,47 @@ async def init_db(db_path: Optional[str] = None) -> None:
                 await db.execute("ALTER TABLE nutrition_goals ADD COLUMN track_bju INTEGER NOT NULL DEFAULT 1;")
             if "track_water" not in cols:
                 await db.execute("ALTER TABLE nutrition_goals ADD COLUMN track_water INTEGER NOT NULL DEFAULT 1;")
+
+        # Safe migration for active_timers to support both habits and tasks
+        async with db.execute("PRAGMA table_info(active_timers);") as cursor:
+            timer_info = {r["name"]: dict(r) for r in await cursor.fetchall()}
+            needs_timer_migration = (
+                "task_id" not in timer_info
+                or timer_info.get("habit_id", {}).get("notnull") == 1
+            )
+
+        if needs_timer_migration:
+            logger.info("Migrating active_timers table to support both habits and tasks...")
+            await db.execute("PRAGMA foreign_keys = OFF;")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS active_timers_new (
+                    user_id INTEGER PRIMARY KEY,
+                    habit_id INTEGER DEFAULT NULL,
+                    task_id INTEGER DEFAULT NULL,
+                    started_at INTEGER NOT NULL,
+                    total_target_seconds INTEGER NOT NULL,
+                    elapsed_before_pause INTEGER NOT NULL DEFAULT 0,
+                    is_paused INTEGER NOT NULL DEFAULT 0,
+                    message_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    FOREIGN KEY(habit_id) REFERENCES habits(id) ON DELETE CASCADE,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                    CHECK((habit_id IS NOT NULL AND task_id IS NULL) OR (habit_id IS NULL AND task_id IS NOT NULL))
+                );
+            """)
+            await db.execute("""
+                INSERT OR REPLACE INTO active_timers_new (
+                    user_id, habit_id, task_id, started_at, total_target_seconds,
+                    elapsed_before_pause, is_paused, message_id, chat_id
+                )
+                SELECT
+                    user_id, habit_id, NULL, started_at, total_target_seconds,
+                    elapsed_before_pause, is_paused, message_id, chat_id
+                FROM active_timers;
+            """)
+            await db.execute("DROP TABLE active_timers;")
+            await db.execute("ALTER TABLE active_timers_new RENAME TO active_timers;")
+            await db.execute("PRAGMA foreign_keys = ON;")
 
         await db.commit()
 

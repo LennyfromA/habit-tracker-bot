@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from aiohttp import web
 
-from bot.database import habits_repo, nutrition_repo, timers_repo, users_repo, water_repo, weight_repo
+from bot.database import habits_repo, nutrition_repo, tasks_repo, timers_repo, users_repo, water_repo, weight_repo
 from bot.handlers.timer import calculate_timer_spent_seconds
 from bot.services.widget_launcher import sync_widget_message
 
@@ -79,7 +79,20 @@ async def api_bootstrap(request: web.Request) -> web.Response:
 
     weekly_stats = await habits_repo.get_weekly_stats(user_id, start_date_str, local_date)
 
-    # 7. Refresh user
+    # 7. Tasks & Lists
+    task_lists = await tasks_repo.get_lists(user_id)
+    tasks_today = await tasks_repo.get_today_tasks(user_id, local_date)
+    all_active_tasks = await tasks_repo.get_all_active_tasks(user_id)
+    completed_tasks_7d = await tasks_repo.get_completed_tasks_in_range(user_id, start_date_str, local_date)
+    tasks_counts = {
+        "today_total": len(tasks_today),
+        "today_completed": sum(1 for t in tasks_today if t.get("is_completed")),
+        "overdue": sum(1 for t in tasks_today if t.get("is_overdue") and not t.get("is_completed")),
+        "all_active": len(all_active_tasks),
+        "completed_7d": len(completed_tasks_7d),
+    }
+
+    # 8. Refresh user
     user = await users_repo.get_user(user_id)
 
     data = {
@@ -90,6 +103,10 @@ async def api_bootstrap(request: web.Request) -> web.Response:
         "server_ts": server_ts,
         "habits_today": habits_today,
         "habits_all": habits_all,
+        "task_lists": task_lists,
+        "tasks_today": tasks_today,
+        "tasks_counts": tasks_counts,
+        "completed_tasks_7d_count": len(completed_tasks_7d),
         "active_timer": timer_payload,
         "nutrition": {
             "goals": nutr_goals,

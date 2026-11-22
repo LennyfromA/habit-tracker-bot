@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Трекер Привычек и Здоровья</title>
+  <title>Трекер Задач, Привычек и Здоровья</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="/widget/assets/styles.css">
   <script src="/widget/assets/app.js" defer></script>
@@ -13,7 +13,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <h1 id="header-title" class="header-title">Привычки</h1>
+        <h1 id="header-title" class="header-title">Задачи</h1>
         <span id="header-date" class="header-date">Сегодня</span>
       </div>
       <div class="header-right">
@@ -21,15 +21,15 @@
       </div>
     </header>
 
-    <!-- 5-Tab Segmented Navigation Bar -->
+    <!-- Exactly 5 Segmented Navigation Tabs (Anti-Bloat Principle) -->
     <nav class="nav-bar">
-      <button type="button" class="nav-btn active" data-tab="habits" id="tab-habits">
-        <span class="nav-icon">📋</span>
-        <span class="nav-label">Привычки</span>
+      <button type="button" class="nav-btn active" data-tab="tasks" id="tab-tasks">
+        <span class="nav-icon">✅</span>
+        <span class="nav-label">Задачи</span>
       </button>
-      <button type="button" class="nav-btn" data-tab="timer" id="tab-timer">
-        <span class="nav-icon">⏱</span>
-        <span class="nav-label">Фокус</span>
+      <button type="button" class="nav-btn" data-tab="habits" id="tab-habits">
+        <span class="nav-icon">🌱</span>
+        <span class="nav-label">Привычки</span>
       </button>
       <button type="button" class="nav-btn" data-tab="health" id="tab-health">
         <span class="nav-icon">🍏</span>
@@ -52,6 +52,44 @@
         <p>Загрузка данных...</p>
       </div>
     </main>
+
+    <!-- Floating Focus Bar (Pinned at bottom, appears when timer is active) -->
+    <div id="floating-focus-bar" class="floating-focus-bar hidden">
+      <div class="focus-bar-content" id="focus-bar-trigger">
+        <span class="focus-bar-dot" id="focus-bar-dot"></span>
+        <div class="focus-bar-info">
+          <div class="focus-bar-title" id="focus-bar-title">Фокус</div>
+          <div class="focus-bar-sub" id="focus-bar-sub">В процессе</div>
+        </div>
+        <div class="focus-bar-time" id="focus-bar-time">25:00</div>
+      </div>
+      <div class="focus-bar-actions">
+        <button type="button" class="focus-bar-btn" id="focus-bar-pause-btn" title="Пауза / Продолжить">⏸</button>
+        <button type="button" class="focus-bar-btn focus-bar-btn-stop" id="focus-bar-stop-btn" title="Завершить">⏹</button>
+      </div>
+    </div>
+
+    <!-- Focus Full Overlay Sheet -->
+    <div id="focus-overlay" class="focus-overlay hidden">
+      <div class="focus-overlay-backdrop" id="focus-overlay-close"></div>
+      <div class="focus-overlay-sheet">
+        <div class="focus-overlay-handle"></div>
+        <div class="focus-overlay-header">
+          <span class="focus-overlay-badge" id="focus-overlay-badge">Фокус</span>
+          <button type="button" class="focus-overlay-dismiss" id="focus-overlay-dismiss-btn">✕</button>
+        </div>
+        <h2 class="focus-overlay-title" id="focus-overlay-title">Название</h2>
+        <div class="focus-overlay-circle-wrap">
+          <div class="focus-overlay-timer" id="focus-overlay-timer">25:00</div>
+          <div class="focus-overlay-meta" id="focus-overlay-meta">Осталось из 25 мин</div>
+        </div>
+        <div class="focus-overlay-controls">
+          <button type="button" class="btn-timer-ctrl" id="focus-ctrl-pause">⏸ Пауза</button>
+          <button type="button" class="btn-timer-ctrl" id="focus-ctrl-add10">+10 мин</button>
+          <button type="button" class="btn-timer-ctrl btn-danger" id="focus-ctrl-stop">⏹ Завершить</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Toast Notification -->
     <div id="toast" class="toast hidden"></div>

@@ -10,12 +10,12 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.database import habits_repo, timers_repo, users_repo
+from bot.database import habits_repo, tasks_repo, timers_repo, users_repo
 from bot.keyboards.inline import get_timer_controls_keyboard
 from bot.keyboards.reply import get_main_reply_keyboard
-from bot.services.widget_launcher import is_widget_enabled, send_widget_card
+from bot.services.widget_launcher import is_widget_enabled, send_widget_card, sync_widget_message
 from bot.states.habit_states import TimerStates
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,48 @@ async def cb_timer_stop(
     if spent_seconds >= 30 and actual_minutes == 0:
         actual_minutes = 1
 
+    # Check if this timer was for a task
+    if timer.get("task_id") or timer.get("target_type") == "task":
+        task_id = timer["task_id"]
+        task_name = timer.get("target_name") or timer.get("habit_name") or "Задача"
+        escaped_task_name = html.escape(task_name)
+
+        if actual_minutes > 0:
+            await tasks_repo.add_task_spent_minutes(task_id, actual_minutes)
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Отметить задачу выполненной",
+                            callback_data=f"task_rem_done:{task_id}",
+                        )
+                    ]
+                ]
+            )
+            try:
+                await callback.message.edit_text(
+                    f"⏹ <b>Сессия завершена досрочно!</b>\n\n"
+                    f"🎯 Задача: «{escaped_task_name}»\n"
+                    f"⏱ Засчитано: <b>+{actual_minutes} мин.</b>",
+                    reply_markup=kb,
+                )
+            except Exception as e:
+                logger.debug("Failed to edit task timer text on stop: %s", e)
+        else:
+            try:
+                await callback.message.edit_text(
+                    f"⏹ Фокус-сессия по задаче «{escaped_task_name}» отменена (прошло менее 30 сек, время не засчитано).",
+                    reply_markup=None,
+                )
+            except Exception as e:
+                logger.debug("Failed to edit task timer text on cancel: %s", e)
+
+        if is_widget_enabled():
+            await sync_widget_message(callback.bot, user_id)
+
+        await callback.answer("Сессия остановлена.")
+        return
+
     habit_id = timer["habit_id"]
     habit_name = timer["habit_name"]
     escaped_habit_name = html.escape(habit_name)
@@ -300,6 +342,9 @@ async def cb_timer_stop(
                 logger.warning("TelegramBadRequest on timer cancel: %s", e)
         except Exception as e:
             logger.debug("Failed to edit timer text on cancel: %s", e)
+
+    if is_widget_enabled():
+        await sync_widget_message(callback.bot, user_id)
 
     await callback.answer("Сессия остановлена.")
 

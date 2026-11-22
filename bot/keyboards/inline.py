@@ -352,7 +352,10 @@ def get_timer_controls_keyboard(is_paused: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_checkin_dashboard_keyboard(habits: List[dict]) -> InlineKeyboardMarkup:
+def get_checkin_dashboard_keyboard(
+    habits: List[dict],
+    has_uncompleted_tasks: bool = False,
+) -> InlineKeyboardMarkup:
     """Build interactive dashboard keyboard for evening check-in."""
     rows: List[List[InlineKeyboardButton]] = []
 
@@ -369,6 +372,11 @@ def get_checkin_dashboard_keyboard(habits: List[dict]) -> InlineKeyboardMarkup:
             rows.append(
                 [InlineKeyboardButton(text=btn_text, callback_data=f"checkin_complete:{h['id']}")]
             )
+
+    if has_uncompleted_tasks:
+        rows.append(
+            [InlineKeyboardButton(text="📅 Перенести незакрытые задачи на завтра", callback_data="checkin_defer_tasks")]
+        )
 
     rows.append([InlineKeyboardButton(text="🎉 Завершить чек-ин", callback_data="checkin_finish")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

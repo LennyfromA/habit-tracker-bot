@@ -4,11 +4,11 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Build compact persistent main navigation keyboard (Health, Habits, Settings)."""
+    """Build compact persistent main navigation keyboard (Health, Plan/Tasks, Settings)."""
     keyboard = [
         [
             KeyboardButton(text="🍏 Здоровье"),
-            KeyboardButton(text="📋 Привычки"),
+            KeyboardButton(text="📋 План"),
         ],
         [
             KeyboardButton(text="⚙️ Настройки"),

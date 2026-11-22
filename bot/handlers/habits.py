@@ -146,7 +146,7 @@ async def render_habits_list_view(
     )
 
 
-@router.message(F.text.in_(["📋 Привычки", "📋 Мои привычки"]))
+@router.message(F.text.in_(["📋 План", "📋 Привычки", "📋 Мои привычки"]))
 @router.message(Command("habits"))
 async def cmd_habits_list(
     message: Message,
@@ -154,15 +154,16 @@ async def cmd_habits_list(
     local_date: str,
     local_weekday: int,
 ) -> None:
-    """Display active habits for today."""
+    """Display active habits or task tracker for today."""
     if is_widget_enabled():
         user = user_data or await users_repo.get_user(message.from_user.id)
         offset = user.get("utc_offset", 3) if user else 3
+        v_type = "tasks" if message.text == "📋 План" else "habits"
         await send_widget_card(
             bot=message.bot,
             chat_id=message.chat.id,
             user_id=message.from_user.id,
-            view="habits",
+            view=v_type,
             local_date=local_date,
             local_weekday=local_weekday,
             utc_offset=offset,

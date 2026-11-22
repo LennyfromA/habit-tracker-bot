@@ -23,6 +23,7 @@ from bot.config import settings
 from bot.database import (
     habits_repo,
     nutrition_repo,
+    tasks_repo,
     timers_repo,
     users_repo,
     water_repo,
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_VIEWS = {
     "dashboard",
+    "tasks",
     "habits",
     "timer",
     "health",
@@ -96,7 +98,37 @@ async def build_chat_card(
 
     view_type = view if view in SUPPORTED_VIEWS else "dashboard"
 
-    if view_type == "habits":
+    if view_type == "tasks":
+        today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+        total = len(today_tasks)
+        completed = sum(1 for t in today_tasks if t.get("is_completed"))
+        overdue_count = sum(1 for t in today_tasks if t.get("is_overdue") and not t.get("is_completed"))
+
+        overdue_badge = f" | ⚠️ Просрочено: <b>{overdue_count}</b>" if overdue_count > 0 else ""
+        lines = [
+            f"📋 <b>Список задач на сегодня</b> ({weekday_name}, <code>{local_date}</code>)",
+            f"Прогресс: <b>{completed}/{total}</b> закрыто{overdue_badge}\n",
+        ]
+
+        if not today_tasks:
+            lines.append("<i>На сегодня задач нет! Создайте задачу кнопкой ниже или командой /t</i>")
+        else:
+            for t in today_tasks[:10]:
+                is_comp = bool(t.get("is_completed"))
+                status_icon = "✅" if is_comp else "▫️"
+                t_title = html.escape(t["title"])
+                time_badge = f" ({t['due_time']})" if t.get("due_time") else ""
+                dur_badge = f" ⏱ {t['estimated_minutes']}м" if t.get("estimated_minutes") else ""
+                lines.append(f"{status_icon} <b>{t_title}</b>{time_badge}{dur_badge}")
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [build_widget_launch_button("📋 Открыть задачи и списки", "tasks", wid)],
+            ]
+        )
+        return "\n".join(lines), kb
+
+    elif view_type == "habits":
         habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
         total = len(habits)
         completed = sum(1 for h in habits if h.get("is_completed"))
@@ -224,10 +256,13 @@ async def build_chat_card(
         summary = await nutrition_repo.get_daily_summary(user_id, local_date)
         water_cur = await water_repo.get_daily_water(user_id, local_date)
         water_tgt = await water_repo.get_water_target(user_id)
+        today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+        t_comp = sum(1 for t in today_tasks if t.get("is_completed"))
 
         lines = [
             f"🌙 <b>Вечерний чек-ин продуктивности ({local_date})</b>\n",
             f"🎯 <b>Привычки:</b> <b>{completed + frozen}/{total}</b> выполнено/заморожено",
+            f"📌 <b>Задачи:</b> <b>{t_comp}/{len(today_tasks)}</b> закрыто",
             f"🔥 <b>Калории:</b> <b>{summary.get('total_calories', 0)} ккал</b>",
             f"💧 <b>Вода:</b> <b>{water_cur}/{water_tgt} мл</b>\n",
             "Подведите итоги дня в 1 клик, отметьте выполненные задачи и зафиксируйте стрик!",
@@ -318,6 +353,13 @@ async def build_chat_card(
         water_cur = await water_repo.get_daily_water(user_id, local_date)
         water_tgt = await water_repo.get_water_target(user_id)
 
+        today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+        t_comp = sum(1 for t in today_tasks if t.get("is_completed"))
+        tasks_line = ""
+        if today_tasks:
+            tasks_bar = render_progress_bar(t_comp, len(today_tasks), length=8)
+            tasks_line = f"📌 <b>Задачи:</b> {tasks_bar} <b>{t_comp}/{len(today_tasks)}</b>\n"
+
         target_cals = goals.get("target_calories", 2000)
         spent_cals = summary.get("total_calories", 0)
 
@@ -332,6 +374,7 @@ async def build_chat_card(
             f"✨ <b>Главная панель продуктивности</b>\n"
             f"📅 {weekday_name}, <code>{local_date}</code>\n\n"
             f"🎯 <b>Привычки:</b> {habits_bar} <b>{completed_habits + frozen_habits}/{total_habits}</b>\n"
+            f"{tasks_line}"
             f"🔥 <b>Калории:</b> {cals_bar} <b>{spent_cals}/{target_cals} ккал</b>\n"
             f"💧 <b>Вода:</b> {water_bar} <b>{water_cur}/{water_tgt} мл</b>\n"
             f"{timer_status}\n\n"

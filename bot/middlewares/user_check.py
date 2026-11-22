@@ -11,6 +11,7 @@ from bot.database import users_repo
 MAIN_MENU_BUTTONS: Set[str] = {
     "🍏 Здоровье",
     "🥗 Питание",
+    "📋 План",
     "📋 Привычки",
     "📋 Мои привычки",
     "⚙️ Настройки",
