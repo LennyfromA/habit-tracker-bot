@@ -113,26 +113,47 @@ async def start_auto_tunnel(local_port: int, token: Optional[str] = None) -> Opt
     tunnel_url = None
     url_pattern = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
 
+    start_t = asyncio.get_event_loop().time()
+    max_wait = 45.0  # Allow up to 45 seconds for Cloudflare registration
+
     try:
-        start_t = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start_t < 25:
+        while asyncio.get_event_loop().time() - start_t < max_wait:
             if _tunnel_proc.returncode is not None:
                 logger.error("cloudflared exited unexpectedly with code %s", _tunnel_proc.returncode)
                 break
 
-            line_bytes = await asyncio.wait_for(_tunnel_proc.stdout.readline(), timeout=5.0)
+            time_left = max(1.0, max_wait - (asyncio.get_event_loop().time() - start_t))
+            try:
+                line_bytes = await asyncio.wait_for(_tunnel_proc.stdout.readline(), timeout=time_left)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out after %s seconds waiting for cloudflared tunnel URL", max_wait)
+                break
+
             if not line_bytes:
                 break
             line = line_bytes.decode("utf-8", errors="replace").strip()
-            logger.debug("[cloudflared] %s", line)
+            if line:
+                logger.info("[cloudflared] %s", line)
 
             match = url_pattern.search(line)
             if match:
                 tunnel_url = match.group(0)
                 logger.info("🌐 Auto-tunnel established: %s", tunnel_url)
                 break
-    except (asyncio.TimeoutError, Exception) as e:
-        logger.warning("Timeout or error waiting for cloudflared tunnel URL: %s", e)
+    except Exception as e:
+        logger.warning("Error reading cloudflared tunnel URL: %s", e)
+
+    # Launch background drain task so pipe buffer never fills up
+    if _tunnel_proc and _tunnel_proc.returncode is None:
+        async def _drain_output(proc: asyncio.subprocess.Process):
+            try:
+                while proc.returncode is None and proc.stdout:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+            except Exception:
+                pass
+        asyncio.create_task(_drain_output(_tunnel_proc))
 
     return tunnel_url
 

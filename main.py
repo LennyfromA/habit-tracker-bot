@@ -77,7 +77,8 @@ async def main() -> None:
     # 6.1 Check if Auto-Tunnel should be started (runs directly on server without PC)
     should_auto_tunnel = (
         settings.AUTO_TUNNEL
-        or settings.WIDGET_BASE_URL.strip().lower() == "auto"
+        or settings.WIDGET_BASE_URL.strip().lower() in ("auto", "")
+        or not settings.WIDGET_BASE_URL.strip().startswith("https://")
         or bool(settings.CLOUDFLARE_TUNNEL_TOKEN)
     )
     if should_auto_tunnel:
