@@ -64,6 +64,7 @@ async def static_assets_handler(request: web.Request) -> web.Response:
     allowed_files = {
         "styles.css": ("text/css", "utf-8"),
         "app.js": ("application/javascript", "utf-8"),
+        "manifest.json": ("application/manifest+json", "utf-8"),
     }
 
     if filename not in allowed_files or "/" in filename or "\\" in filename or ".." in filename:

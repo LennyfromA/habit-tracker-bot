@@ -3,7 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#17212b">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="DayPulse">
   <title>Трекер Задач, Привычек и Здоровья</title>
+  <link rel="manifest" href="/widget/assets/manifest.json">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="/widget/assets/styles.css">
   <script src="/widget/assets/app.js" defer></script>
@@ -17,6 +23,10 @@
         <span id="header-date" class="header-date">Сегодня</span>
       </div>
       <div class="header-right">
+        <button type="button" id="btn-add-to-home" class="btn-header-action hidden" title="Добавить на главный экран">
+          <span class="btn-header-icon">📲</span>
+          <span class="btn-header-label">На экран</span>
+        </button>
         <span id="sync-indicator" class="sync-dot" title="Синхронизировано с чатом"></span>
       </div>
     </header>

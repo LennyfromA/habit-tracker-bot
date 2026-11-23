@@ -95,6 +95,32 @@ button, input, select, textarea {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+
+.btn-header-action {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-full);
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 150ms ease;
+}
+
+.btn-header-action:hover, .btn-header-action:active {
+  transform: scale(0.96);
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-header-action.hidden {
+  display: none !important;
 }
 
 .sync-dot {
@@ -1282,6 +1308,112 @@ button, input, select, textarea {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
+  position: relative;
+}
+
+.task-date-picker-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  background-color: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 260px;
+  backdrop-filter: blur(8px);
+}
+
+.task-date-picker-popover.hidden {
+  display: none !important;
+}
+
+.date-popover-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.btn-date-quick {
+  background: color-mix(in srgb, var(--surface) 75%, var(--bg));
+  border: 1px solid var(--surface-border);
+  color: var(--text);
+  font-size: 0.75rem;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: center;
+  transition: all 120ms ease;
+}
+
+.btn-date-quick:hover, .btn-date-quick.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.date-popover-native-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--surface-border);
+}
+
+.date-popover-native-label {
+  font-size: 0.72rem;
+  color: var(--hint);
+  font-weight: 500;
+}
+
+.date-popover-inputs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.input-native-date, .input-native-time {
+  background: color-mix(in srgb, var(--surface) 80%, var(--bg));
+  border: 1px solid var(--surface-border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 0.8rem;
+  outline: none;
+  font-family: inherit;
+  color-scheme: dark;
+}
+
+.input-native-date {
+  flex: 1.4;
+}
+
+.input-native-time {
+  flex: 1;
+}
+
+.date-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.btn-date-popover-ok {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .task-add-chip-btn {

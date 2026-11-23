@@ -30,10 +30,15 @@
     tasksFilter: "today", // 'today', 'inbox', 'all', or list_id
     tasksData: [],
     expandedTasks: new Set(),
-    quickTaskDate: "today", // 'today', 'tomorrow', 'none'
+    quickTaskDateType: "today", // 'today', 'tomorrow', 'custom', 'none'
+    quickTaskCustomDate: "", // 'YYYY-MM-DD'
+    quickTaskCustomTime: "", // 'HH:MM'
+    isDatePickerOpen: false,
     quickTaskEstimate: null, // 15, 25, 45, 60
     quickTaskListId: null,
     autoOpenFocusOverlay: false,
+    deferredPrompt: null, // PWA beforeinstallprompt
+    homeScreenStatus: "unknown", // 'unsupported', 'unknown', 'added', 'missed'
   };
 
   const tg = window.Telegram?.WebApp;
@@ -49,7 +54,34 @@
       tg.onEvent("themeChanged", () => {
         // Theme variables update automatically via CSS variables
       });
+
+      // Check Add to Home Screen support
+      if (typeof tg.checkHomeScreenStatus === "function") {
+        try {
+          tg.checkHomeScreenStatus((status) => {
+            state.homeScreenStatus = status;
+            updateHomeScreenButton();
+          });
+        } catch (_) {}
+      } else if (typeof tg.addToHomeScreen === "function") {
+        state.homeScreenStatus = "missed";
+        updateHomeScreenButton();
+      }
     }
+
+    // PWA beforeinstallprompt handler for regular mobile browsers
+    window.addEventListener("beforeinstallprompt", (e) => {
+      e.preventDefault();
+      state.deferredPrompt = e;
+      state.homeScreenStatus = "missed";
+      updateHomeScreenButton();
+    });
+
+    window.addEventListener("appinstalled", () => {
+      state.homeScreenStatus = "added";
+      state.deferredPrompt = null;
+      updateHomeScreenButton();
+    });
 
     const params = new URLSearchParams(window.location.search);
     state.wid = params.get("wid") || "";
@@ -103,6 +135,49 @@
     setTimeout(() => {
       toast.className = "toast hidden";
     }, 2800);
+  }
+
+  // Add to Home Screen handler & UI updater
+  function updateHomeScreenButton() {
+    const btn = document.getElementById("btn-add-to-home");
+    if (!btn) return;
+
+    const isSupported = (typeof tg?.addToHomeScreen === "function") || Boolean(state.deferredPrompt);
+    const isAdded = state.homeScreenStatus === "added";
+
+    if (isSupported && !isAdded) {
+      btn.classList.remove("hidden");
+    } else {
+      btn.classList.add("hidden");
+    }
+  }
+
+  function setupHomeScreenEvents() {
+    const btn = document.getElementById("btn-add-to-home");
+    if (!btn) return;
+
+    btn.addEventListener("click", async () => {
+      haptic("medium");
+      if (typeof tg?.addToHomeScreen === "function") {
+        try {
+          tg.addToHomeScreen();
+          showToast("Запрос на добавление отправлен! 📱");
+        } catch (e) {
+          showToast("Не удалось добавить на экран", true);
+        }
+      } else if (state.deferredPrompt) {
+        state.deferredPrompt.prompt();
+        const choice = await state.deferredPrompt.userChoice;
+        if (choice.outcome === "accepted") {
+          showToast("Приложение установлено! 📱");
+          state.homeScreenStatus = "added";
+          updateHomeScreenButton();
+        }
+        state.deferredPrompt = null;
+      } else {
+        alert("Чтобы добавить на рабочий стол, нажмите 'Поделиться' в браузере и выберите 'На экран «Домой»'");
+      }
+    });
   }
 
   // Visual Sync Pulse Indicator
@@ -475,7 +550,22 @@
       `;
     }
 
-    const dateLabels = { today: "📅 Сегодня", tomorrow: "📅 Завтра", none: "📅 Без даты" };
+    function getDateLabel() {
+      if (state.quickTaskDateType === "none") return "📅 Без даты";
+      if (state.quickTaskDateType === "today") {
+        return state.quickTaskCustomTime ? `📅 Сегодня, ${state.quickTaskCustomTime}` : "📅 Сегодня";
+      }
+      if (state.quickTaskDateType === "tomorrow") {
+        return state.quickTaskCustomTime ? `📅 Завтра, ${state.quickTaskCustomTime}` : "📅 Завтра";
+      }
+      if (state.quickTaskDateType === "custom" && state.quickTaskCustomDate) {
+        const parts = state.quickTaskCustomDate.split("-");
+        const formatted = `${parts[2]}.${parts[1]}`;
+        return state.quickTaskCustomTime ? `📅 ${formatted}, ${state.quickTaskCustomTime}` : `📅 ${formatted}`;
+      }
+      return "📅 Дата";
+    }
+
     const estLabels = { 15: "⏱ 15м", 25: "⏱ 25м", 45: "⏱ 45м", 60: "⏱ 1ч", null: "⏱ Таймер" };
 
     const quickAddHtml = `
@@ -485,9 +575,29 @@
           <button type="button" class="btn-add-task" id="btn-submit-quick-task" title="Добавить">+</button>
         </div>
         <div class="task-add-chips-row">
-          <button type="button" class="task-add-chip-btn ${state.quickTaskDate !== "none" ? "selected" : ""}" id="chip-task-date">
-            ${dateLabels[state.quickTaskDate] || "📅 Сегодня"}
+          <button type="button" class="task-add-chip-btn ${state.quickTaskDateType !== "none" ? "selected" : ""}" id="chip-task-date">
+            ${escapeHtml(getDateLabel())} ▾
           </button>
+
+          <!-- Native Date & Time Picker Popover -->
+          <div class="task-date-picker-popover ${state.isDatePickerOpen ? "" : "hidden"}" id="task-date-popover">
+            <div class="date-popover-quick-grid">
+              <button type="button" class="btn-date-quick ${state.quickTaskDateType === "today" ? "active" : ""}" data-date-quick="today">Сегодня</button>
+              <button type="button" class="btn-date-quick ${state.quickTaskDateType === "tomorrow" ? "active" : ""}" data-date-quick="tomorrow">Завтра</button>
+              <button type="button" class="btn-date-quick ${state.quickTaskDateType === "none" ? "active" : ""}" data-date-quick="none">Без даты</button>
+            </div>
+            <div class="date-popover-native-row">
+              <span class="date-popover-native-label">Выбрать дату и время:</span>
+              <div class="date-popover-inputs">
+                <input type="date" class="input-native-date" id="input-task-custom-date" value="${state.quickTaskCustomDate || (state.quickTaskDateType === "today" ? (state.bootstrap?.local_date || "") : "")}">
+                <input type="time" class="input-native-time" id="input-task-custom-time" value="${state.quickTaskCustomTime || ""}" placeholder="Время">
+              </div>
+            </div>
+            <div class="date-popover-actions">
+              <button type="button" class="btn-date-popover-ok" id="btn-date-popover-done">Готово</button>
+            </div>
+          </div>
+
           <button type="button" class="task-add-chip-btn ${state.quickTaskEstimate ? "selected" : ""}" id="chip-task-est">
             ${estLabels[state.quickTaskEstimate] || "⏱ Таймер"}
           </button>
@@ -650,14 +760,88 @@
       } catch (_) {}
     });
 
-    // Quick add chips
-    document.getElementById("chip-task-date")?.addEventListener("click", () => {
+    // Quick add chips & Date Popover
+    const chipDateBtn = document.getElementById("chip-task-date");
+    const datePopover = document.getElementById("task-date-popover");
+
+    chipDateBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
       haptic("light");
-      const cycle = ["today", "tomorrow", "none"];
-      const nextIdx = (cycle.indexOf(state.quickTaskDate) + 1) % cycle.length;
-      state.quickTaskDate = cycle[nextIdx];
+      state.isDatePickerOpen = !state.isDatePickerOpen;
+      if (datePopover) {
+        datePopover.classList.toggle("hidden", !state.isDatePickerOpen);
+      }
+    });
+
+    // Quick date selection buttons inside popover
+    container.querySelectorAll(".btn-date-quick[data-date-quick]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        haptic("light");
+        const type = btn.dataset.dateQuick;
+        state.quickTaskDateType = type;
+        if (type === "today") {
+          state.quickTaskCustomDate = state.bootstrap?.local_date || "";
+        } else if (type === "tomorrow") {
+          const d = new Date(state.bootstrap?.local_date || new Date().toISOString().split("T")[0]);
+          d.setDate(d.getDate() + 1);
+          state.quickTaskCustomDate = d.toISOString().split("T")[0];
+        } else if (type === "none") {
+          state.quickTaskCustomDate = "";
+          state.quickTaskCustomTime = "";
+        }
+        state.isDatePickerOpen = false;
+        renderTasksView(container);
+      });
+    });
+
+    // Native Date & Time input change handlers
+    document.getElementById("input-task-custom-date")?.addEventListener("change", (e) => {
+      const val = e.target.value;
+      if (val) {
+        state.quickTaskCustomDate = val;
+        const todayStr = state.bootstrap?.local_date;
+        if (val === todayStr) {
+          state.quickTaskDateType = "today";
+        } else {
+          state.quickTaskDateType = "custom";
+        }
+      }
+    });
+
+    document.getElementById("input-task-custom-time")?.addEventListener("change", (e) => {
+      state.quickTaskCustomTime = e.target.value || "";
+    });
+
+    document.getElementById("btn-date-popover-done")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      haptic("light");
+      const dateVal = document.getElementById("input-task-custom-date")?.value;
+      const timeVal = document.getElementById("input-task-custom-time")?.value;
+      if (dateVal) {
+        state.quickTaskCustomDate = dateVal;
+        const todayStr = state.bootstrap?.local_date;
+        if (dateVal === todayStr) {
+          state.quickTaskDateType = "today";
+        } else {
+          state.quickTaskDateType = "custom";
+        }
+      }
+      state.quickTaskCustomTime = timeVal || "";
+      state.isDatePickerOpen = false;
       renderTasksView(container);
     });
+
+    // Close popover when clicking outside
+    const handleDocumentClick = (e) => {
+      if (state.isDatePickerOpen && !e.target.closest("#task-date-popover") && !e.target.closest("#chip-task-date")) {
+        state.isDatePickerOpen = false;
+        if (datePopover) datePopover.classList.add("hidden");
+      }
+    };
+    document.removeEventListener("click", container._datePickerCloser);
+    container._datePickerCloser = handleDocumentClick;
+    document.addEventListener("click", handleDocumentClick);
 
     document.getElementById("chip-task-est")?.addEventListener("click", () => {
       haptic("light");
@@ -683,13 +867,17 @@
       const listId = listSelect?.value ? parseInt(listSelect.value, 10) : state.quickTaskListId;
 
       let dueDate = null;
-      if (state.quickTaskDate === "today") {
-        dueDate = state.bootstrap.local_date;
-      } else if (state.quickTaskDate === "tomorrow") {
-        const d = new Date(state.bootstrap.local_date);
+      if (state.quickTaskDateType === "today") {
+        dueDate = state.bootstrap?.local_date;
+      } else if (state.quickTaskDateType === "tomorrow") {
+        const d = new Date(state.bootstrap?.local_date || new Date().toISOString().split("T")[0]);
         d.setDate(d.getDate() + 1);
         dueDate = d.toISOString().split("T")[0];
+      } else if (state.quickTaskDateType === "custom" && state.quickTaskCustomDate) {
+        dueDate = state.quickTaskCustomDate;
       }
+
+      const dueTime = state.quickTaskCustomTime || null;
 
       try {
         await apiFetch("/api/tasks", {
@@ -698,11 +886,13 @@
             title: rawTitle,
             list_id: listId,
             due_date: dueDate,
+            due_time: dueTime,
             estimated_minutes: state.quickTaskEstimate,
           }),
         });
         showToast("Задача создана! ✅");
         if (input) input.value = "";
+        state.isDatePickerOpen = false;
         await loadBootstrap();
         await loadTasksData();
         renderTasksView(container);
@@ -2488,6 +2678,19 @@
     const isMuted = muteUntil > nowTs || muteUntil === 2147483647;
 
     container.innerHTML = `
+      <!-- App Install / Home Screen Card -->
+      <div class="card" id="card-install-app">
+        <div class="card-header">
+          <span class="card-title">📱 Приложение на экране смартфона</span>
+        </div>
+        <p style="font-size:0.8rem; color:var(--hint); margin:4px 0 10px 0;">
+          Добавьте DayPulse на рабочий стол телефона для быстрого запуска в полноэкранном режиме в 1 клик.
+        </p>
+        <button type="button" class="btn-timer-ctrl btn-primary" id="btn-settings-install-app">
+          📲 Добавить на экран «Домой»
+        </button>
+      </div>
+
       <!-- Timezone & Checkin Time -->
       <div class="card">
         <span class="card-title">⏰ Часовой пояс и напоминания</span>
@@ -2642,12 +2845,37 @@
         } catch (_) {}
       });
     });
+
+    // Settings Add To Home Screen button
+    document.getElementById("btn-settings-install-app")?.addEventListener("click", async () => {
+      haptic("medium");
+      if (typeof tg?.addToHomeScreen === "function") {
+        try {
+          tg.addToHomeScreen();
+          showToast("Запрос на добавление отправлен! 📱");
+        } catch (e) {
+          showToast("Не удалось добавить на экран", true);
+        }
+      } else if (state.deferredPrompt) {
+        state.deferredPrompt.prompt();
+        const choice = await state.deferredPrompt.userChoice;
+        if (choice.outcome === "accepted") {
+          showToast("Приложение установлено! 📱");
+          state.homeScreenStatus = "added";
+          updateHomeScreenButton();
+        }
+        state.deferredPrompt = null;
+      } else {
+        alert("Чтобы добавить на рабочий стол, нажмите 'Поделиться' в браузере Safari/Chrome и выберите 'На экран «Домой»'");
+      }
+    });
   }
 
   // App Bootstrap
   document.addEventListener("DOMContentLoaded", () => {
     initTelegram();
     setupTabs();
+    setupHomeScreenEvents();
     setupFloatingFocusBarEvents();
     loadBootstrap();
   });
