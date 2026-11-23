@@ -437,8 +437,9 @@ async def check_task_reminders(bot: Bot) -> None:
 
         candidates = await tasks_repo.get_due_task_reminders_candidates(user_id, local_date, local_time)
         for task in candidates:
-            # Check if reminder was already sent for this time window
-            if await tasks_repo.was_task_reminder_sent(task["id"], local_date, local_time):
+            # Check if reminder was already sent for this task today
+            task_due_time = task.get("due_time") or local_time
+            if await tasks_repo.was_task_reminder_sent(task["id"], local_date, task_due_time):
                 continue
 
             kb = InlineKeyboardMarkup(
@@ -461,7 +462,7 @@ async def check_task_reminders(bot: Bot) -> None:
             except Exception as e:
                 logger.warning("Failed to send task reminder to %s: %s", user_id, e)
 
-            await tasks_repo.record_task_reminder_sent(task["id"], user_id, local_date, local_time)
+            await tasks_repo.record_task_reminder_sent(task["id"], user_id, local_date, task_due_time)
 
 
 async def global_tick(bot: Bot, storage: Optional[BaseStorage] = None) -> None:

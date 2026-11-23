@@ -469,15 +469,18 @@ async def send_widget_card(
 
 async def send_widget_push(
     bot: Bot,
-    chat_id: int,
     user_id: int,
     view: str,
     local_date: str,
     local_weekday: int,
     utc_offset: int,
+    chat_id: Optional[int] = None,
     prefix_html: Optional[str] = None,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
 ) -> Message:
     """Send scheduled push notification as an interactive widget card."""
+    target_chat_id = chat_id if chat_id is not None else user_id
     wid = secrets.token_urlsafe(9)
     card_text, kb = await build_chat_card(
         user_id=user_id,
@@ -488,9 +491,13 @@ async def send_widget_push(
         utc_offset=utc_offset,
     )
 
-    full_text = f"{prefix_html}\n\n{card_text}" if prefix_html else card_text
+    content_header = f"<b>{html.escape(title)}</b>\n\n" if title else ""
+    content_body = f"{body}\n\n" if body else ""
+    extra_text = f"{content_header}{content_body}" if (title or body) else ""
+    full_text = f"{prefix_html}\n\n{card_text}" if prefix_html else (f"{extra_text}{card_text}" if extra_text else card_text)
+
     sent = await bot.send_message(
-        chat_id=chat_id,
+        chat_id=target_chat_id,
         text=full_text,
         reply_markup=kb,
         parse_mode="HTML",
@@ -498,7 +505,7 @@ async def send_widget_push(
     await widgets_repo.save_widget_message(
         wid=wid,
         user_id=user_id,
-        chat_id=chat_id,
+        chat_id=target_chat_id,
         message_id=sent.message_id,
         view_type=view,
     )
