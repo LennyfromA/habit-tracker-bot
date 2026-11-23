@@ -255,6 +255,20 @@ async def test_api_bootstrap_and_settings(web_client: TestClient):
     assert patch_data["data"]["notifications_muted_until"] == 2147483647
 
 
+async def test_api_test_notification(web_client: TestClient):
+    """Test POST /api/settings/test-notification endpoint."""
+    valid_header = make_test_init_data(TEST_USER_ID)
+    headers = {"X-Telegram-Init-Data": valid_header}
+
+    resp = await web_client.post("/api/settings/test-notification", headers=headers)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["ok"] is True
+    assert "local_time" in data
+    assert "local_date" in data
+    assert "utc_offset" in data
+
+
 async def test_api_stats_periods(web_client: TestClient):
     """Test /api/stats endpoint supports 7, 15, 30, and 90 day periods."""
     valid_header = make_test_init_data(TEST_USER_ID)

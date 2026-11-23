@@ -573,3 +573,108 @@ async def cb_settings_export(callback: CallbackQuery) -> None:
     local_date = local_now.strftime("%Y-%m-%d")
     await render_export_view(callback.message, user_id=user_id, local_date=local_date)
     await callback.answer()
+
+
+@router.message(Command("test_notify"))
+async def cmd_test_notify(message: Message) -> None:
+    """Send immediate test notifications (weight and checkin) and show diagnostic info."""
+    user_id = message.from_user.id
+    user = await users_repo.get_user(user_id)
+    if not user:
+        await message.answer("⚠️ Пользователь не найден. Отправьте /start")
+        return
+
+    offset = user.get("utc_offset", 3)
+    now_utc = datetime.now(timezone.utc)
+    local_now = now_utc + timedelta(hours=offset)
+    local_date = local_now.strftime("%Y-%m-%d")
+    local_hm = local_now.strftime("%H:%M")
+    local_weekday = local_now.isoweekday()
+
+    w_enabled = bool(user.get("weight_reminder_enabled", 0))
+    w_time = user.get("weight_reminder_time", "08:00")
+    ci_time = user.get("checkin_time", "21:00")
+    mute_until = user.get("notifications_muted_until", 0) or 0
+    now_ts = int(time.time())
+    is_muted = mute_until > now_ts or mute_until == 2147483647
+
+    diag_text = (
+        "🧪 <b>Диагностика уведомлений DayPulse</b>\n\n"
+        f"👤 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"🌍 <b>Часовой пояс:</b> <code>UTC{'+' if offset >= 0 else ''}{offset}</code>\n"
+        f"🕒 <b>Текущее время сервера (UTC):</b> <code>{now_utc.strftime('%H:%M:%S')}</code>\n"
+        f"🕒 <b>Ваше местное время:</b> <code>{local_hm}</code> ({local_date})\n\n"
+        f"⚖️ <b>Утренний вес:</b> {'Включено ✅' if w_enabled else 'Выключено ❌'} (время: <code>{w_time}</code>)\n"
+        f"🌙 <b>Вечерний чек-ин:</b> <code>{ci_time}</code>\n"
+        f"🔕 <b>Режим \"Не беспокоить\":</b> {'Включен (заглушено) 🔕' if is_muted else 'Выключен (уведомления активны) 🔔'}\n\n"
+        "<i>Ниже отправлены тестовые интерактивные карточки:</i>"
+    )
+    await message.answer(diag_text)
+
+    # 1. Test weight reminder card
+    from bot.services.widget_launcher import send_widget_push
+    try:
+        if is_widget_enabled():
+            await send_widget_push(
+                bot=message.bot,
+                user_id=user_id,
+                view="health",
+                title="⚖️ [Тест] Утреннее взвешивание",
+                body="🌅 <b>Это тестовое напоминание о взвешивании!</b>\nЕсли вы видите эту карточку — пуш-уведомления работают штатно.",
+                local_date=local_date,
+                local_weekday=local_weekday,
+                utc_offset=offset,
+            )
+        else:
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚖️ Записать вес", callback_data="weight_enter")]])
+            await message.bot.send_message(
+                chat_id=user_id,
+                text="🌅 <b>[Тест] Время утреннего взвешивания!</b>\nЕсли вы видите это сообщение — уведомления работают.",
+                reply_markup=kb,
+            )
+    except Exception as e:
+        logger.warning("Failed to send test weight notification: %s", e)
+
+    # 2. Test check-in card
+    try:
+        from bot.handlers.checkin import format_checkin_text
+        from bot.keyboards.inline import get_checkin_dashboard_keyboard
+        from bot.database import nutrition_repo, water_repo, tasks_repo
+        habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
+        today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+        nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+        nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+        water_cur = await water_repo.get_daily_water(user_id, local_date)
+        water_tgt = await water_repo.get_water_target(user_id)
+
+        checkin_text = format_checkin_text(
+            habits=habits,
+            local_date=local_date,
+            nutrition_summary=nutr_summary,
+            nutrition_goals=nutr_goals,
+            water_ml=water_cur,
+            water_target=water_tgt,
+            tasks=today_tasks,
+        )
+        if is_widget_enabled():
+            await send_widget_push(
+                bot=message.bot,
+                user_id=user_id,
+                view="checkin",
+                title="🌙 [Тест] Вечерний чек-ин",
+                body=checkin_text,
+                local_date=local_date,
+                local_weekday=local_weekday,
+                utc_offset=offset,
+            )
+        else:
+            has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
+            kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
+            await message.bot.send_message(
+                chat_id=user_id,
+                text=checkin_text,
+                reply_markup=kb,
+            )
+    except Exception as e:
+        logger.warning("Failed to send test checkin notification: %s", e)

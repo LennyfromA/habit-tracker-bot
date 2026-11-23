@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 def is_time_in_window(current_hm: str, target_hm: str, window_minutes: int = 30) -> bool:
     """Return True if current_hm is within [target_hm, target_hm + window_minutes].
     Handles single hour format e.g. '7' or '07' as '07:00'.
+    Handles midnight wrap-around (e.g. target 23:50, current 00:05).
     """
     try:
         cur_h, cur_m = map(int, current_hm.split(":"))
@@ -32,6 +33,8 @@ def is_time_in_window(current_hm: str, target_hm: str, window_minutes: int = 30)
         else:
             tgt_h, tgt_m = int(target_hm), 0
         diff = (cur_h * 60 + cur_m) - (tgt_h * 60 + tgt_m)
+        if diff < -1200:
+            diff += 1440
         return 0 <= diff <= window_minutes
     except Exception:
         return current_hm == target_hm
@@ -200,48 +203,45 @@ async def check_evening_checkins(bot: Bot) -> None:
             weekday = local_now.isoweekday()
             habits = await habits_repo.get_today_habits_with_status(user_id, local_date, weekday)
             today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+            nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+            nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+            water_cur = await water_repo.get_daily_water(user_id, local_date)
+            water_tgt = await water_repo.get_water_target(user_id)
+            has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
 
-            if habits or today_tasks:
-                nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
-                nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
-                water_cur = await water_repo.get_daily_water(user_id, local_date)
-                water_tgt = await water_repo.get_water_target(user_id)
-                has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
+            checkin_text = format_checkin_text(
+                habits=habits,
+                local_date=local_date,
+                nutrition_summary=nutr_summary,
+                nutrition_goals=nutr_goals,
+                water_ml=water_cur,
+                water_target=water_tgt,
+                tasks=today_tasks,
+            )
+            kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
 
-                checkin_text = format_checkin_text(
-                    habits=habits,
-                    local_date=local_date,
-                    nutrition_summary=nutr_summary,
-                    nutrition_goals=nutr_goals,
-                    water_ml=water_cur,
-                    water_target=water_tgt,
-                    tasks=today_tasks,
-                )
-                kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
-
-                try:
-                    if is_widget_enabled():
-                        await send_widget_push(
-                            bot=bot,
-                            user_id=user_id,
-                            view="checkin",
-                            title="🌙 Вечерний чек-ин",
-                            body=checkin_text,
-                            local_date=local_date,
-                            local_weekday=weekday,
-                            utc_offset=offset,
-                        )
-                    else:
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=checkin_text,
-                            reply_markup=kb,
-                        )
-                except Exception as e:
-                    logger.warning("Failed to send checkin message to %s: %s", user_id, e)
-
-            # Record checkin sent date
-            await users_repo.update_user_last_checkin_date(user_id, local_date)
+            try:
+                if is_widget_enabled():
+                    await send_widget_push(
+                        bot=bot,
+                        user_id=user_id,
+                        view="checkin",
+                        title="🌙 Вечерний чек-ин",
+                        body=checkin_text,
+                        local_date=local_date,
+                        local_weekday=weekday,
+                        utc_offset=offset,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=checkin_text,
+                        reply_markup=kb,
+                    )
+                logger.info("Sent evening checkin to user %s (time=%s, date=%s)", user_id, local_hm, local_date)
+                await users_repo.update_user_last_checkin_date(user_id, local_date)
+            except Exception as e:
+                logger.warning("Failed to send checkin message to %s: %s", user_id, e)
 
 
 async def check_weight_reminders(bot: Bot) -> None:
@@ -295,10 +295,10 @@ async def check_weight_reminders(bot: Bot) -> None:
                         text=weight_body,
                         reply_markup=kb,
                     )
+                logger.info("Sent morning weight reminder to user %s (time=%s, date=%s)", user_id, local_hm, local_date)
+                await users_repo.update_user_last_weight_reminder_date(user_id, local_date)
             except Exception as e:
                 logger.warning("Failed to send weight reminder to %s: %s", user_id, e)
-
-            await users_repo.update_user_last_weight_reminder_date(user_id, local_date)
 
 
 async def check_midnight_resets() -> None:
@@ -417,10 +417,10 @@ async def check_habit_reminders(bot: Bot) -> None:
                                 ),
                                 reply_markup=kb,
                             )
+                            logger.info("Sent habit reminder for habit %s to user %s", h["id"], user_id)
+                            await habits_repo.record_habit_reminder_sent(h["id"], user_id, local_date, rem_time)
                         except Exception as e:
                             logger.warning("Failed to send habit reminder to %s: %s", user_id, e)
-
-                        await habits_repo.record_habit_reminder_sent(h["id"], user_id, local_date, rem_time)
 
 
 async def check_task_reminders(bot: Bot) -> None:
@@ -464,10 +464,10 @@ async def check_task_reminders(bot: Bot) -> None:
             )
             try:
                 await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
+                logger.info("Sent task reminder for task %s to user %s", task["id"], user_id)
+                await tasks_repo.record_task_reminder_sent(task["id"], user_id, local_date, task_due_time)
             except Exception as e:
                 logger.warning("Failed to send task reminder to %s: %s", user_id, e)
-
-            await tasks_repo.record_task_reminder_sent(task["id"], user_id, local_date, task_due_time)
 
 
 async def global_tick(bot: Bot, storage: Optional[BaseStorage] = None) -> None:

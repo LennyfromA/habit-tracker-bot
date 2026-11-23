@@ -2754,6 +2754,9 @@
           <button type="button" class="pill-btn" data-mute="86400">24ч</button>
           <button type="button" class="pill-btn ${muteUntil === 2147483647 ? "active" : ""}" data-mute="forever">Всегда</button>
         </div>
+        <button type="button" class="btn-timer-ctrl" id="btn-test-notification" style="margin-top:12px; width:100%; font-size:0.82rem; background:var(--surface-hover); border:1px solid var(--surface-border); border-radius:var(--radius-md);">
+          🧪 Проверить доставку уведомлений в чат
+        </button>
       </div>
     `;
 
@@ -2834,6 +2837,17 @@
           await loadBootstrap();
         } catch (_) {}
       });
+    });
+
+    // Test notification button
+    document.getElementById("btn-test-notification")?.addEventListener("click", async () => {
+      haptic("medium");
+      try {
+        await apiFetch("/api/settings/test-notification", { method: "POST" });
+        showToast("🔔 Тестовое уведомление отправлено в чат Telegram!");
+      } catch (err) {
+        showToast(err.message || "Ошибка отправки теста", true);
+      }
     });
   }
 

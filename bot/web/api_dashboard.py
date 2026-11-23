@@ -242,3 +242,71 @@ async def api_update_settings(request: web.Request) -> web.Response:
     synced = await sync_widget_message(bot, user_id, wid=wid, fallback_view="settings")
 
     return web.json_response({"ok": True, "data": updated_user, "synced": synced})
+
+
+@routes.post("/api/settings/test-notification")
+async def api_test_notification(request: web.Request) -> web.Response:
+    """Send immediate test push notification (checkin & diagnostic) to user Telegram chat."""
+    auth = request["auth"]
+    user_id = auth["user_id"]
+    local_date = auth["local_date"]
+    local_weekday = auth["local_weekday"]
+    utc_offset = auth["utc_offset"]
+    bot = request.app["bot"]
+
+    user = await users_repo.get_user(user_id)
+    offset = user.get("utc_offset", utc_offset) if user else utc_offset
+    now_utc = datetime.now(timezone.utc)
+    local_now = now_utc + timedelta(hours=offset)
+    local_hm = local_now.strftime("%H:%M")
+
+    from bot.services.widget_launcher import send_widget_push, is_widget_enabled
+    from bot.handlers.checkin import format_checkin_text
+    from bot.keyboards.inline import get_checkin_dashboard_keyboard
+
+    # Test Check-in notification
+    try:
+        habits = await habits_repo.get_today_habits_with_status(user_id, local_date, local_weekday)
+        today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
+        nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
+        nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
+        water_cur = await water_repo.get_daily_water(user_id, local_date)
+        water_tgt = await water_repo.get_water_target(user_id)
+        checkin_text = format_checkin_text(
+            habits=habits,
+            local_date=local_date,
+            nutrition_summary=nutr_summary,
+            nutrition_goals=nutr_goals,
+            water_ml=water_cur,
+            water_target=water_tgt,
+            tasks=today_tasks,
+        )
+        if is_widget_enabled():
+            await send_widget_push(
+                bot=bot,
+                user_id=user_id,
+                view="checkin",
+                title="🌙 [Тест] Вечерний чек-ин",
+                body=checkin_text,
+                local_date=local_date,
+                local_weekday=local_weekday,
+                utc_offset=offset,
+            )
+        else:
+            has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
+            kb = get_checkin_dashboard_keyboard(habits, has_uncompleted_tasks=has_uncompleted)
+            await bot.send_message(
+                chat_id=user_id,
+                text=checkin_text,
+                reply_markup=kb,
+            )
+    except Exception as e:
+        logger.warning("Failed to send test checkin from web api: %s", e)
+
+    return web.json_response({
+        "ok": True,
+        "message": "Тестовое уведомление отправлено в чат Telegram!",
+        "local_time": local_hm,
+        "local_date": local_date,
+        "utc_offset": offset,
+    })

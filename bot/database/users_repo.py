@@ -46,9 +46,9 @@ async def update_user_timezone(user_id: int, utc_offset: int) -> None:
 
 
 async def update_user_checkin_time(user_id: int, checkin_time: str) -> None:
-    """Update user's daily check-in time (HH:MM)."""
+    """Update user's daily check-in time (HH:MM) and reset last sent date to allow immediate reschedule."""
     async with get_db() as db:
-        query = "UPDATE users SET checkin_time = ? WHERE user_id = ?;"
+        query = "UPDATE users SET checkin_time = ?, last_checkin_date = NULL WHERE user_id = ?;"
         await db.execute(query, (checkin_time, user_id))
         await db.commit()
 
@@ -111,10 +111,10 @@ async def update_weight_reminder(
     enabled: int,
     reminder_time: Optional[str] = None,
 ) -> None:
-    """Update user's morning weight reminder settings."""
+    """Update user's morning weight reminder settings and reset last sent date when time is updated."""
     async with get_db() as db:
         if reminder_time is not None:
-            query = "UPDATE users SET weight_reminder_enabled = ?, weight_reminder_time = ? WHERE user_id = ?;"
+            query = "UPDATE users SET weight_reminder_enabled = ?, weight_reminder_time = ?, last_weight_reminder_date = NULL WHERE user_id = ?;"
             await db.execute(query, (enabled, reminder_time, user_id))
         else:
             query = "UPDATE users SET weight_reminder_enabled = ? WHERE user_id = ?;"
