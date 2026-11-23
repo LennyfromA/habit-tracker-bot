@@ -30,6 +30,7 @@
     tasksFilter: "today", // 'today', 'inbox', 'all', or list_id
     tasksData: [],
     expandedTasks: new Set(),
+    quickTaskDraftTitle: "",
     quickTaskDateType: "today", // 'today', 'tomorrow', 'custom', 'none'
     quickTaskCustomDate: "", // 'YYYY-MM-DD'
     quickTaskCustomTime: "", // 'HH:MM'
@@ -499,7 +500,7 @@
     const quickAddHtml = `
       <div class="task-quick-add-box">
         <div class="task-input-row">
-          <input type="text" class="task-quick-input" id="task-quick-title-input" placeholder="+ Новая задача (например: Позвонить врачу завтра 14:00 #здоровье 25m)" autocomplete="off">
+          <input type="text" class="task-quick-input" id="task-quick-title-input" placeholder="+ Новая задача (например: Позвонить врачу завтра 14:00 #здоровье 25m)" value="${escapeHtml(state.quickTaskDraftTitle || "")}" autocomplete="off">
           <button type="button" class="btn-add-task" id="btn-submit-quick-task" title="Добавить">+</button>
         </div>
         <div class="task-add-chips-row">
@@ -628,7 +629,7 @@
                 </div>
               </div>
               <div class="task-actions-col">
-                ${!isComp ? `<button type="button" class="btn-task-focus" data-task-focus="${t.id}" title="Фокус-таймер">⏱ Фокус</button>` : ""}
+                ${(!isComp && t.estimated_minutes) ? `<button type="button" class="btn-task-focus" data-task-focus="${t.id}" title="Фокус-таймер">⏱ Фокус</button>` : ""}
                 <button type="button" class="btn-task-icon" data-task-del="${t.id}" title="Удалить задачу">🗑</button>
               </div>
             </div>
@@ -691,10 +692,31 @@
     // Quick add chips & Date Popover
     const chipDateBtn = document.getElementById("chip-task-date");
     const datePopover = document.getElementById("task-date-popover");
+    const titleInput = document.getElementById("task-quick-title-input");
+
+    // Track input text dynamically so re-rendering keeps user input
+    titleInput?.addEventListener("input", (e) => {
+      state.quickTaskDraftTitle = e.target.value;
+    });
+
+    // Helper: validate whether chosen date + time is in the past
+    function isChosenDateTimePast(dateStr, timeStr) {
+      if (!dateStr || !timeStr) return false;
+      const todayStr = state.bootstrap?.local_date;
+      if (dateStr < todayStr) return true;
+      if (dateStr === todayStr) {
+        // Compare with local current time (HH:MM)
+        const now = new Date();
+        const curHM = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+        return timeStr < curHM;
+      }
+      return false;
+    }
 
     chipDateBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       haptic("light");
+      if (titleInput) state.quickTaskDraftTitle = titleInput.value;
       state.isDatePickerOpen = !state.isDatePickerOpen;
       if (datePopover) {
         datePopover.classList.toggle("hidden", !state.isDatePickerOpen);
@@ -706,6 +728,7 @@
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         haptic("light");
+        if (titleInput) state.quickTaskDraftTitle = titleInput.value;
         const type = btn.dataset.dateQuick;
         state.quickTaskDateType = type;
         if (type === "today") {
@@ -738,12 +761,23 @@
     });
 
     document.getElementById("input-task-custom-time")?.addEventListener("change", (e) => {
-      state.quickTaskCustomTime = e.target.value || "";
+      const timeVal = e.target.value || "";
+      const targetDate = state.quickTaskDateType === "today"
+        ? state.bootstrap?.local_date
+        : (state.quickTaskDateType === "tomorrow"
+            ? (() => { const d = new Date(state.bootstrap?.local_date); d.setDate(d.getDate() + 1); return d.toISOString().split("T")[0]; })()
+            : state.quickTaskCustomDate);
+
+      if (timeVal && isChosenDateTimePast(targetDate, timeVal)) {
+        showToast("⚠️ Выбранное время уже прошло!", true);
+      }
+      state.quickTaskCustomTime = timeVal;
     });
 
     document.getElementById("btn-date-popover-done")?.addEventListener("click", (e) => {
       e.stopPropagation();
       haptic("light");
+      if (titleInput) state.quickTaskDraftTitle = titleInput.value;
       const dateVal = document.getElementById("input-task-custom-date")?.value;
       const timeVal = document.getElementById("input-task-custom-time")?.value;
       if (dateVal) {
@@ -755,6 +789,20 @@
           state.quickTaskDateType = "custom";
         }
       }
+
+      if (timeVal) {
+        const targetDate = state.quickTaskDateType === "today"
+          ? state.bootstrap?.local_date
+          : (state.quickTaskDateType === "tomorrow"
+              ? (() => { const d = new Date(state.bootstrap?.local_date); d.setDate(d.getDate() + 1); return d.toISOString().split("T")[0]; })()
+              : state.quickTaskCustomDate);
+
+        if (isChosenDateTimePast(targetDate, timeVal)) {
+          showToast("⚠️ Время уже прошло! Укажите будущее время", true);
+          return;
+        }
+      }
+
       state.quickTaskCustomTime = timeVal || "";
       state.isDatePickerOpen = false;
       renderTasksView(container);
@@ -773,6 +821,7 @@
 
     document.getElementById("chip-task-est")?.addEventListener("click", () => {
       haptic("light");
+      if (titleInput) state.quickTaskDraftTitle = titleInput.value;
       const cycle = [null, 15, 25, 45, 60];
       const nextIdx = (cycle.indexOf(state.quickTaskEstimate) + 1) % cycle.length;
       state.quickTaskEstimate = cycle[nextIdx];
@@ -787,12 +836,8 @@
     // Quick task submit
     async function submitQuickTask() {
       const input = document.getElementById("task-quick-title-input");
-      const rawTitle = input?.value.trim();
+      const rawTitle = (input?.value || state.quickTaskDraftTitle || "").trim();
       if (!rawTitle) return;
-
-      haptic("medium");
-      const listSelect = document.getElementById("quick-task-list-select");
-      const listId = listSelect?.value ? parseInt(listSelect.value, 10) : state.quickTaskListId;
 
       let dueDate = null;
       if (state.quickTaskDateType === "today") {
@@ -807,6 +852,16 @@
 
       const dueTime = state.quickTaskCustomTime || null;
 
+      if (dueDate && dueTime && isChosenDateTimePast(dueDate, dueTime)) {
+        haptic("error");
+        showToast("⚠️ Нельзя установить время в прошлом!", true);
+        return;
+      }
+
+      haptic("medium");
+      const listSelect = document.getElementById("quick-task-list-select");
+      const listId = listSelect?.value ? parseInt(listSelect.value, 10) : state.quickTaskListId;
+
       try {
         await apiFetch("/api/tasks", {
           method: "POST",
@@ -819,6 +874,7 @@
           }),
         });
         showToast("Задача создана! ✅");
+        state.quickTaskDraftTitle = "";
         if (input) input.value = "";
         state.isDatePickerOpen = false;
         await loadBootstrap();

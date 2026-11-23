@@ -205,6 +205,20 @@ async def api_create_task(request: web.Request) -> web.Response:
     notes = data.get("notes")
     due_date = data.get("due_date") or None
     due_time = data.get("due_time") or None
+
+    # Validate that due_time on today is not in the past
+    if due_date and due_time:
+        user = await users_repo.get_user(user_id)
+        offset = user.get("utc_offset", 3) if user else 3
+        local_now = datetime.now(timezone.utc) + timedelta(hours=offset)
+        local_today_str = local_now.strftime("%Y-%m-%d")
+        local_hm_str = local_now.strftime("%H:%M")
+        if due_date < local_today_str or (due_date == local_today_str and due_time < local_hm_str):
+            return web.json_response(
+                {"ok": False, "error": "Нельзя установить время напоминания в прошлом"},
+                status=400,
+            )
+
     recurrence = str(data.get("recurrence") or "none").strip().lower()
     if recurrence not in ("none", "daily", "weekdays", "weekly"):
         recurrence = "none"

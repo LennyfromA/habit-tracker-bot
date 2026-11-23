@@ -111,14 +111,12 @@ async def cmd_tasks(message: Message) -> None:
         if details_str:
             details_str = f"\n▫️ {details_str}"
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="⏱ Начать фокус", callback_data=f"task_focus:{task_id}"),
-                    InlineKeyboardButton(text="✅ Выполнено", callback_data=f"task_rem_done:{task_id}"),
-                ]
-            ]
-        )
+        buttons = []
+        if parsed.get("estimated_minutes"):
+            buttons.append(InlineKeyboardButton(text="⏱ Начать фокус", callback_data=f"task_focus:{task_id}"))
+        buttons.append(InlineKeyboardButton(text="✅ Выполнено", callback_data=f"task_rem_done:{task_id}"))
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[buttons])
 
         await message.answer(
             f"✅ <b>Задача добавлена в {html.escape(list_title)}:</b>\n"
@@ -154,10 +152,10 @@ async def cmd_tasks(message: Message) -> None:
         lines.append(f"{status_icon} <b>{html.escape(t['title'])}</b>{time_badge}{overdue_badge}")
 
         if not t["is_completed"]:
-            kb_rows.append([
-                InlineKeyboardButton(text=f"✅ {t['title'][:20]}", callback_data=f"task_rem_done:{t['id']}"),
-                InlineKeyboardButton(text="⏱ Фокус", callback_data=f"task_focus:{t['id']}"),
-            ])
+            row = [InlineKeyboardButton(text=f"✅ {t['title'][:20]}", callback_data=f"task_rem_done:{t['id']}")]
+            if t.get("estimated_minutes"):
+                row.append(InlineKeyboardButton(text="⏱ Фокус", callback_data=f"task_focus:{t['id']}"))
+            kb_rows.append(row)
 
     await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None)
 
