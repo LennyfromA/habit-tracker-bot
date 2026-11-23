@@ -37,8 +37,6 @@
     quickTaskEstimate: null, // 15, 25, 45, 60
     quickTaskListId: null,
     autoOpenFocusOverlay: false,
-    deferredPrompt: null, // PWA beforeinstallprompt
-    homeScreenStatus: "unknown", // 'unsupported', 'unknown', 'added', 'missed'
   };
 
   const tg = window.Telegram?.WebApp;
@@ -54,34 +52,7 @@
       tg.onEvent("themeChanged", () => {
         // Theme variables update automatically via CSS variables
       });
-
-      // Check Add to Home Screen support
-      if (typeof tg.checkHomeScreenStatus === "function") {
-        try {
-          tg.checkHomeScreenStatus((status) => {
-            state.homeScreenStatus = status;
-            updateHomeScreenButton();
-          });
-        } catch (_) {}
-      } else if (typeof tg.addToHomeScreen === "function") {
-        state.homeScreenStatus = "missed";
-        updateHomeScreenButton();
-      }
     }
-
-    // PWA beforeinstallprompt handler for regular mobile browsers
-    window.addEventListener("beforeinstallprompt", (e) => {
-      e.preventDefault();
-      state.deferredPrompt = e;
-      state.homeScreenStatus = "missed";
-      updateHomeScreenButton();
-    });
-
-    window.addEventListener("appinstalled", () => {
-      state.homeScreenStatus = "added";
-      state.deferredPrompt = null;
-      updateHomeScreenButton();
-    });
 
     const params = new URLSearchParams(window.location.search);
     state.wid = params.get("wid") || "";
@@ -135,49 +106,6 @@
     setTimeout(() => {
       toast.className = "toast hidden";
     }, 2800);
-  }
-
-  // Add to Home Screen handler & UI updater
-  function updateHomeScreenButton() {
-    const btn = document.getElementById("btn-add-to-home");
-    if (!btn) return;
-
-    const isSupported = (typeof tg?.addToHomeScreen === "function") || Boolean(state.deferredPrompt);
-    const isAdded = state.homeScreenStatus === "added";
-
-    if (isSupported && !isAdded) {
-      btn.classList.remove("hidden");
-    } else {
-      btn.classList.add("hidden");
-    }
-  }
-
-  function setupHomeScreenEvents() {
-    const btn = document.getElementById("btn-add-to-home");
-    if (!btn) return;
-
-    btn.addEventListener("click", async () => {
-      haptic("medium");
-      if (typeof tg?.addToHomeScreen === "function") {
-        try {
-          tg.addToHomeScreen();
-          showToast("Запрос на добавление отправлен! 📱");
-        } catch (e) {
-          showToast("Не удалось добавить на экран", true);
-        }
-      } else if (state.deferredPrompt) {
-        state.deferredPrompt.prompt();
-        const choice = await state.deferredPrompt.userChoice;
-        if (choice.outcome === "accepted") {
-          showToast("Приложение установлено! 📱");
-          state.homeScreenStatus = "added";
-          updateHomeScreenButton();
-        }
-        state.deferredPrompt = null;
-      } else {
-        alert("Чтобы добавить на рабочий стол, нажмите 'Поделиться' в браузере и выберите 'На экран «Домой»'");
-      }
-    });
   }
 
   // Visual Sync Pulse Indicator
@@ -2678,19 +2606,6 @@
     const isMuted = muteUntil > nowTs || muteUntil === 2147483647;
 
     container.innerHTML = `
-      <!-- App Install / Home Screen Card -->
-      <div class="card" id="card-install-app">
-        <div class="card-header">
-          <span class="card-title">📱 Приложение на экране смартфона</span>
-        </div>
-        <p style="font-size:0.8rem; color:var(--hint); margin:4px 0 10px 0;">
-          Добавьте DayPulse на рабочий стол телефона для быстрого запуска в полноэкранном режиме в 1 клик.
-        </p>
-        <button type="button" class="btn-timer-ctrl btn-primary" id="btn-settings-install-app">
-          📲 Добавить на экран «Домой»
-        </button>
-      </div>
-
       <!-- Timezone & Checkin Time -->
       <div class="card">
         <span class="card-title">⏰ Часовой пояс и напоминания</span>
@@ -2845,37 +2760,12 @@
         } catch (_) {}
       });
     });
-
-    // Settings Add To Home Screen button
-    document.getElementById("btn-settings-install-app")?.addEventListener("click", async () => {
-      haptic("medium");
-      if (typeof tg?.addToHomeScreen === "function") {
-        try {
-          tg.addToHomeScreen();
-          showToast("Запрос на добавление отправлен! 📱");
-        } catch (e) {
-          showToast("Не удалось добавить на экран", true);
-        }
-      } else if (state.deferredPrompt) {
-        state.deferredPrompt.prompt();
-        const choice = await state.deferredPrompt.userChoice;
-        if (choice.outcome === "accepted") {
-          showToast("Приложение установлено! 📱");
-          state.homeScreenStatus = "added";
-          updateHomeScreenButton();
-        }
-        state.deferredPrompt = null;
-      } else {
-        alert("Чтобы добавить на рабочий стол, нажмите 'Поделиться' в браузере Safari/Chrome и выберите 'На экран «Домой»'");
-      }
-    });
   }
 
   // App Bootstrap
   document.addEventListener("DOMContentLoaded", () => {
     initTelegram();
     setupTabs();
-    setupHomeScreenEvents();
     setupFloatingFocusBarEvents();
     loadBootstrap();
   });

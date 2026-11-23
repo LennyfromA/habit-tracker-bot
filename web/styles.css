@@ -95,32 +95,6 @@ button, input, select, textarea {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.btn-header-action {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-full);
-  padding: 3px 8px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  transition: all 150ms ease;
-}
-
-.btn-header-action:hover, .btn-header-action:active {
-  transform: scale(0.96);
-  background: var(--accent);
-  color: #fff;
-}
-
-.btn-header-action.hidden {
-  display: none !important;
 }
 
 .sync-dot {
