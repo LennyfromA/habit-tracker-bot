@@ -119,11 +119,24 @@
     }, 1200);
   }
 
-  // Unified API Fetch wrapper
+  // Unified API Fetch wrapper with in-flight deduplication / debouncing
+  const activePostRequests = new Set();
+
   async function apiFetch(url, options = {}) {
     let finalUrl = url;
     if (state.isDev && !finalUrl.includes("dev=1")) {
       finalUrl += (finalUrl.includes("?") ? "&" : "?") + "dev=1";
+    }
+
+    const method = (options.method || "GET").toUpperCase();
+    const reqKey = `${method}:${url}:${options.body || ""}`;
+
+    // Prevent duplicate concurrent mutation requests (anti-spam / anti-double-click)
+    if (method !== "GET") {
+      if (activePostRequests.has(reqKey)) {
+        return Promise.reject(new Error("Подождите, запрос уже выполняется..."));
+      }
+      activePostRequests.add(reqKey);
     }
 
     const headers = Object.assign(
@@ -152,9 +165,15 @@
 
       return data;
     } catch (err) {
-      showToast(err.message || "Ошибка соединения", true);
-      haptic("error");
+      if (!err.message?.includes("запрос уже выполняется")) {
+        showToast(err.message || "Ошибка соединения", true);
+        haptic("error");
+      }
       throw err;
+    } finally {
+      if (method !== "GET") {
+        setTimeout(() => activePostRequests.delete(reqKey), 350);
+      }
     }
   }
 

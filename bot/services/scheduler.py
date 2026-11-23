@@ -22,10 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 def is_time_in_window(current_hm: str, target_hm: str, window_minutes: int = 30) -> bool:
-    """Return True if current_hm is within [target_hm, target_hm + window_minutes]."""
+    """Return True if current_hm is within [target_hm, target_hm + window_minutes].
+    Handles single hour format e.g. '7' or '07' as '07:00'.
+    """
     try:
         cur_h, cur_m = map(int, current_hm.split(":"))
-        tgt_h, tgt_m = map(int, target_hm.split(":"))
+        if ":" in target_hm:
+            tgt_h, tgt_m = map(int, target_hm.split(":"))
+        else:
+            tgt_h, tgt_m = int(target_hm), 0
         diff = (cur_h * 60 + cur_m) - (tgt_h * 60 + tgt_m)
         return 0 <= diff <= window_minutes
     except Exception:
@@ -194,13 +199,13 @@ async def check_evening_checkins(bot: Bot) -> None:
         if is_time_in_window(local_hm, checkin_time, 30) and user.get("last_checkin_date") != local_date:
             weekday = local_now.isoweekday()
             habits = await habits_repo.get_today_habits_with_status(user_id, local_date, weekday)
+            today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
 
-            if habits:
+            if habits or today_tasks:
                 nutr_summary = await nutrition_repo.get_daily_summary(user_id, local_date)
                 nutr_goals = await nutrition_repo.get_nutrition_goals(user_id)
                 water_cur = await water_repo.get_daily_water(user_id, local_date)
                 water_tgt = await water_repo.get_water_target(user_id)
-                today_tasks = await tasks_repo.get_today_tasks(user_id, local_date)
                 has_uncompleted = any(not t.get("is_completed") for t in today_tasks)
 
                 checkin_text = format_checkin_text(

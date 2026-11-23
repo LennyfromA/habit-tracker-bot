@@ -273,6 +273,13 @@ async def init_db(db_path: Optional[str] = None) -> None:
             if "notifications_muted_until" not in cols:
                 await db.execute("ALTER TABLE users ADD COLUMN notifications_muted_until INTEGER NOT NULL DEFAULT 0;")
 
+        # Normalize malformed weight_reminder_time (e.g. '07' or '7' -> '07:00')
+        await db.execute("""
+            UPDATE users 
+            SET weight_reminder_time = printf('%02d:00', CAST(weight_reminder_time AS INTEGER))
+            WHERE weight_reminder_time NOT LIKE '%:%' AND length(trim(weight_reminder_time)) > 0;
+        """)
+
         async with db.execute("PRAGMA table_info(habits);") as cursor:
             cols = [r["name"] for r in await cursor.fetchall()]
             if "habit_type" not in cols:
