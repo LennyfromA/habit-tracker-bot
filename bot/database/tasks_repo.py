@@ -814,22 +814,44 @@ async def delete_subtask(subtask_id: int, user_id: int) -> bool:
 # Task Reminders
 # ---------------------------------------------------------------------------
 
-async def get_due_task_reminders_candidates(user_id: int, local_date: str) -> List[Dict[str, Any]]:
-    """Get active uncompleted tasks scheduled for local_date that have due_time configured."""
+async def get_due_task_reminders_candidates(
+    user_id: int, local_date: str, local_time: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get active uncompleted tasks scheduled for local_date that have due_time configured.
+    If local_time is provided, only returns tasks due at or before local_time.
+    """
     async with get_db() as db:
-        query = """
-        SELECT
-            t.*,
-            l.name AS list_name,
-            l.icon AS list_icon
-        FROM tasks t
-        LEFT JOIN task_lists l ON l.id = t.list_id
-        WHERE t.user_id = ?
-          AND t.is_completed = 0
-          AND t.due_date = ?
-          AND t.due_time IS NOT NULL;
-        """
-        async with db.execute(query, (user_id, local_date)) as cursor:
+        if local_time:
+            query = """
+            SELECT
+                t.*,
+                l.name AS list_name,
+                l.icon AS list_icon
+            FROM tasks t
+            LEFT JOIN task_lists l ON l.id = t.list_id
+            WHERE t.user_id = ?
+              AND t.is_completed = 0
+              AND t.due_date = ?
+              AND t.due_time IS NOT NULL
+              AND t.due_time <= ?;
+            """
+            params = (user_id, local_date, local_time)
+        else:
+            query = """
+            SELECT
+                t.*,
+                l.name AS list_name,
+                l.icon AS list_icon
+            FROM tasks t
+            LEFT JOIN task_lists l ON l.id = t.list_id
+            WHERE t.user_id = ?
+              AND t.is_completed = 0
+              AND t.due_date = ?
+              AND t.due_time IS NOT NULL;
+            """
+            params = (user_id, local_date)
+
+        async with db.execute(query, params) as cursor:
             return [dict(r) for r in await cursor.fetchall()]
 
 
